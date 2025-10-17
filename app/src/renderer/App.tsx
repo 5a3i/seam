@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { SessionRecord } from '../shared/types'
 
 const fallbackVersions = {
@@ -188,6 +188,8 @@ export function App() {
             </p>
           ) : null}
         </section>
+
+        <MicrophonePanel />
       </div>
     </main>
   )
@@ -205,4 +207,294 @@ function StatCard({ label, value }: StatCardProps) {
       <p className="mt-2 text-lg font-semibold text-slate-100">{value}</p>
     </div>
   )
+}
+
+type RecorderStatus = 'idle' | 'initializing' | 'recording' | 'denied' | 'unsupported' | 'error'
+
+type RecordingSummary = {
+  url: string
+  size: number
+  mimeType: string
+  createdAt: number
+  durationMs: number
+}
+
+function MicrophonePanel() {
+  const supportsMediaRecorder = useMemo(() => {
+    if (typeof navigator === 'undefined' || typeof window === 'undefined') {
+      return false
+    }
+    return Boolean(navigator.mediaDevices?.getUserMedia) && 'MediaRecorder' in window
+  }, [])
+
+  const recorderRef = useRef<MediaRecorder | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const timerRef = useRef<number | null>(null)
+  const startTimestampRef = useRef<number | null>(null)
+  const chunksRef = useRef<BlobPart[]>([])
+  const lastRecordingUrlRef = useRef<string | null>(null)
+
+  const [status, setStatus] = useState<RecorderStatus>(() =>
+    supportsMediaRecorder ? 'idle' : 'unsupported',
+  )
+  const [elapsedMs, setElapsedMs] = useState(0)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [latestRecording, setLatestRecording] = useState<RecordingSummary | null>(null)
+
+  const cleanup = useCallback(
+    (options: { resetElapsed?: boolean } = {}) => {
+      if (timerRef.current !== null) {
+        window.clearInterval(timerRef.current)
+        timerRef.current = null
+      }
+
+      if (recorderRef.current) {
+        try {
+          if (recorderRef.current.state !== 'inactive') {
+            recorderRef.current.stop()
+          }
+        } catch {
+          // ignore if already stopped
+        }
+        recorderRef.current = null
+      }
+
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop())
+        streamRef.current = null
+      }
+
+      chunksRef.current = []
+      startTimestampRef.current = null
+
+      if (options.resetElapsed !== false) {
+        setElapsedMs(0)
+      }
+    },
+    [],
+  )
+
+  useEffect(() => {
+    return () => {
+      cleanup()
+      if (lastRecordingUrlRef.current) {
+        URL.revokeObjectURL(lastRecordingUrlRef.current)
+        lastRecordingUrlRef.current = null
+      }
+    }
+  }, [cleanup])
+
+  const startRecording = useCallback(async () => {
+    if (!supportsMediaRecorder || status === 'recording' || status === 'initializing') {
+      return
+    }
+
+    setErrorMessage(null)
+
+    try {
+      setStatus('initializing')
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      streamRef.current = stream
+
+      const recorder = new MediaRecorder(stream)
+      recorderRef.current = recorder
+      chunksRef.current = []
+      startTimestampRef.current = Date.now()
+
+      const handleData = (event: BlobEvent) => {
+        if (event.data && event.data.size > 0) {
+          chunksRef.current.push(event.data)
+        }
+      }
+
+      const handleStop = () => {
+        if (timerRef.current !== null) {
+          window.clearInterval(timerRef.current)
+          timerRef.current = null
+        }
+
+        const durationMs =
+          startTimestampRef.current !== null ? Date.now() - startTimestampRef.current : elapsedMs
+        const blobParts = chunksRef.current.slice()
+        const mimeType = recorder.mimeType || 'audio/webm'
+
+        recorder.removeEventListener('dataavailable', handleData)
+        recorder.removeEventListener('stop', handleStop)
+
+        cleanup({ resetElapsed: true })
+
+        const blob = new Blob(blobParts, { type: mimeType })
+        if (blob.size > 0) {
+          if (lastRecordingUrlRef.current) {
+            URL.revokeObjectURL(lastRecordingUrlRef.current)
+          }
+          const url = URL.createObjectURL(blob)
+          lastRecordingUrlRef.current = url
+          setLatestRecording({
+            url,
+            size: blob.size,
+            mimeType: blob.type,
+            createdAt: Date.now(),
+            durationMs,
+          })
+        }
+
+        setStatus('idle')
+      }
+
+      recorder.addEventListener('dataavailable', handleData)
+      recorder.addEventListener('stop', handleStop)
+
+      recorder.start()
+      setStatus('recording')
+      setElapsedMs(0)
+      timerRef.current = window.setInterval(() => {
+        setElapsedMs((prev) => prev + 1000)
+      }, 1000)
+    } catch (err) {
+      cleanup()
+      if (err instanceof DOMException && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) {
+        setStatus('denied')
+        setErrorMessage('マイクへのアクセスが拒否されました。システム設定を確認してください。')
+      } else {
+        setStatus('error')
+        setErrorMessage(
+          err instanceof Error ? err.message : 'マイク初期化中にエラーが発生しました。',
+        )
+      }
+    }
+  }, [cleanup, elapsedMs, status, supportsMediaRecorder])
+
+  const stopRecording = useCallback(() => {
+    if (status !== 'recording' && status !== 'initializing') {
+      return
+    }
+
+    if (recorderRef.current && recorderRef.current.state !== 'inactive') {
+      recorderRef.current.stop()
+    } else {
+      cleanup()
+      setStatus('idle')
+    }
+  }, [cleanup, status])
+
+  const resetLatestRecording = useCallback(() => {
+    if (lastRecordingUrlRef.current) {
+      URL.revokeObjectURL(lastRecordingUrlRef.current)
+      lastRecordingUrlRef.current = null
+    }
+    setLatestRecording(null)
+  }, [])
+
+  const formatDuration = (durationMs: number) => {
+    const totalSeconds = Math.floor(durationMs / 1000)
+    const minutes = Math.floor(totalSeconds / 60)
+    const seconds = totalSeconds % 60
+    return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
+  }
+
+  if (!supportsMediaRecorder) {
+    return (
+      <section className="space-y-3 text-left">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
+          Microphone capture
+        </h2>
+        <div className="rounded-xl border border-amber-500/50 bg-amber-500/10 p-4 text-sm text-amber-200">
+          この環境では MediaRecorder API が利用できないため、マイク録音のデモは無効化されています。
+        </div>
+      </section>
+    )
+  }
+
+  return (
+    <section className="space-y-4 text-left">
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
+            Microphone capture
+          </h2>
+          <p className="text-xs text-slate-500">
+            MediaRecorder でマイク入力を取得し、録音時間を計測します。
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={startRecording}
+            disabled={status === 'recording' || status === 'initializing'}
+            className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-rose-100 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {status === 'recording' ? 'Recording…' : 'Start Recording'}
+          </button>
+          <button
+            type="button"
+            onClick={stopRecording}
+            disabled={status !== 'recording' && status !== 'initializing'}
+            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-200 transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Stop
+          </button>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-slate-800/60 bg-slate-950/40 p-4 text-sm text-slate-300">
+        <p className="text-xs uppercase tracking-wide text-slate-500">Status</p>
+        <p className="mt-1 font-semibold text-slate-100">{renderStatusLabel(status)}</p>
+        {status === 'recording' ? (
+          <p className="mt-2 text-2xl font-semibold text-rose-300 tabular-nums">
+            {formatDuration(elapsedMs)}
+          </p>
+        ) : null}
+        {errorMessage ? (
+          <p className="mt-2 rounded-md border border-rose-400/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+            {errorMessage}
+          </p>
+        ) : null}
+      </div>
+
+      {latestRecording ? (
+        <div className="space-y-3 rounded-xl border border-slate-800/60 bg-slate-950/40 p-4">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <p className="text-xs uppercase tracking-wide text-slate-500">Last recording</p>
+              <p className="text-sm font-semibold text-slate-100">
+                {formatDuration(latestRecording.durationMs)}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={resetLatestRecording}
+              className="text-xs font-semibold uppercase tracking-wide text-slate-400 transition hover:text-slate-200"
+            >
+              Clear
+            </button>
+          </div>
+          <audio controls src={latestRecording.url} className="w-full" />
+          <p className="text-[11px] text-slate-500">
+            {latestRecording.mimeType} · {(latestRecording.size / 1024).toFixed(1)} KB ·{' '}
+            {new Date(latestRecording.createdAt).toLocaleTimeString()}
+          </p>
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+function renderStatusLabel(status: RecorderStatus) {
+  switch (status) {
+    case 'idle':
+      return '待機中'
+    case 'initializing':
+      return 'マイク初期化中…'
+    case 'recording':
+      return '録音中'
+    case 'denied':
+      return 'マイク権限が拒否されました'
+    case 'unsupported':
+      return '未対応の環境です'
+    case 'error':
+      return 'エラーが発生しました'
+    default:
+      return '状態不明'
+  }
 }
