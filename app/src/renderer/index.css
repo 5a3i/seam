@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply m-0 bg-slate-950 text-slate-50 font-sans;
+  }
+}
+
+.app {
+  @apply min-h-screen flex flex-col items-center justify-center gap-6 text-center;
+}

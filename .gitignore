@@ -1,0 +1,22 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Builds
+dist/
+dist-electron/
+
+# Editor
+.DS_Store
+*.swp
+*.log
+
+# Runtime data
+sanma.sqlite
+Sanma/settings.json
+
+# Tool caches
+.corepack/
