@@ -1,5 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { SessionRecord, TranscriptionResult } from '../shared/types'
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core'
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
+import type { SessionRecord, AgendaRecord, TranscriptionResult, SuggestionRecord } from '../shared/types'
 
 const fallbackVersions = {
   node: '-',
@@ -189,7 +206,11 @@ export function App() {
           ) : null}
         </section>
 
-        <MicrophonePanel />
+        <AgendaPanel sessionId={sessions[0]?.id} />
+
+        <SuggestionPanel sessionId={sessions[0]?.id} />
+
+        <MicrophonePanel sessionId={sessions[0]?.id} />
       </div>
     </main>
   )
@@ -209,6 +230,444 @@ function StatCard({ label, value }: StatCardProps) {
   )
 }
 
+type AgendaPanelProps = {
+  sessionId?: string
+}
+
+function AgendaPanel({ sessionId }: AgendaPanelProps) {
+  const [agendas, setAgendas] = useState<AgendaRecord[]>([])
+  const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [newAgendaTitle, setNewAgendaTitle] = useState('')
+  const [isCreating, setIsCreating] = useState(false)
+
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  )
+
+  const loadAgendas = useCallback(async () => {
+    if (!sessionId) {
+      setAgendas([])
+      return
+    }
+
+    try {
+      setIsLoading(true)
+      setError(null)
+      const records = await window.sanma.getAgendas({ sessionId })
+      setAgendas(records)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      console.error('[sanma] failed to load agendas', err)
+    } finally {
+      setIsLoading(false)
+    }
+  }, [sessionId])
+
+  useEffect(() => {
+    void loadAgendas()
+  }, [loadAgendas])
+
+  const handleCreateAgenda = useCallback(async () => {
+    if (!sessionId || !newAgendaTitle.trim()) return
+
+    try {
+      setIsCreating(true)
+      const agenda = await window.sanma.createAgenda({ sessionId, title: newAgendaTitle.trim() })
+      setAgendas((prev) => [...prev, agenda])
+      setNewAgendaTitle('')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      console.error('[sanma] failed to create agenda', err)
+    } finally {
+      setIsCreating(false)
+    }
+  }, [sessionId, newAgendaTitle])
+
+  const handleDeleteAgenda = useCallback(async (id: string) => {
+    try {
+      await window.sanma.deleteAgenda({ id })
+      setAgendas((prev) => prev.filter((a) => a.id !== id))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      console.error('[sanma] failed to delete agenda', err)
+    }
+  }, [])
+
+  const handleUpdateAgendaStatus = useCallback(async (id: string, status: string) => {
+    try {
+      const updated = await window.sanma.updateAgenda({ id, status })
+      setAgendas((prev) => prev.map((a) => (a.id === id ? updated : a)))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      console.error('[sanma] failed to update agenda status', err)
+    }
+  }, [])
+
+  const handleDragEnd = useCallback(
+    async (event: DragEndEvent) => {
+      const { active, over } = event
+
+      if (!over || active.id === over.id || !sessionId) return
+
+      const oldIndex = agendas.findIndex((a) => a.id === active.id)
+      const newIndex = agendas.findIndex((a) => a.id === over.id)
+
+      if (oldIndex === -1 || newIndex === -1) return
+
+      const reordered = arrayMove(agendas, oldIndex, newIndex)
+      setAgendas(reordered)
+
+      try {
+        const agendaIds = reordered.map((a) => a.id)
+        await window.sanma.reorderAgendas({ sessionId, agendaIds })
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+        console.error('[sanma] failed to reorder agendas', err)
+        void loadAgendas()
+      }
+    },
+    [agendas, sessionId, loadAgendas],
+  )
+
+  const currentAgenda = agendas.find((a) => a.status === 'current')
+  const nextAgenda = agendas.find((a) => a.status === 'pending')
+
+  if (!sessionId) {
+    return (
+      <section className="space-y-3 text-left">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">Agenda list</h2>
+        <div className="rounded-xl border border-slate-800/60 bg-slate-950/40 p-4 text-sm text-slate-400">
+          セッションを選択してください
+        </div>
+      </section>
+    )
+  }
+
+  return (
+    <section className="space-y-4 text-left">
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">Agenda list</h2>
+          {(currentAgenda || nextAgenda) && (
+            <div className="mt-2 space-y-1 text-xs">
+              {currentAgenda && (
+                <p className="text-emerald-300">
+                  <span className="text-slate-500">Current:</span> {currentAgenda.title}
+                </p>
+              )}
+              {nextAgenda && (
+                <p className="text-sky-300">
+                  <span className="text-slate-500">Next:</span> {nextAgenda.title}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={newAgendaTitle}
+          onChange={(e) => setNewAgendaTitle(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void handleCreateAgenda()
+          }}
+          placeholder="新しい議題を追加"
+          className="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-emerald-500/40 focus:outline-none focus:ring-1 focus:ring-emerald-500/40"
+        />
+        <button
+          type="button"
+          onClick={handleCreateAgenda}
+          disabled={isCreating || !newAgendaTitle.trim()}
+          className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-emerald-100 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {isCreating ? 'Adding…' : 'Add'}
+        </button>
+      </div>
+
+      {error ? (
+        <div className="rounded-lg border border-rose-400/50 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+          {error}
+        </div>
+      ) : null}
+
+      {isLoading ? (
+        <div className="rounded-xl border border-slate-800/60 bg-slate-950/40 p-4 text-sm text-slate-300">
+          Loading agendas...
+        </div>
+      ) : agendas.length > 0 ? (
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+          <SortableContext items={agendas.map((a) => a.id)} strategy={verticalListSortingStrategy}>
+            <ul className="space-y-2">
+              {agendas.map((agenda) => (
+                <SortableAgendaItem
+                  key={agenda.id}
+                  agenda={agenda}
+                  onDelete={handleDeleteAgenda}
+                  onUpdateStatus={handleUpdateAgendaStatus}
+                />
+              ))}
+            </ul>
+          </SortableContext>
+        </DndContext>
+      ) : (
+        <div className="rounded-xl border border-slate-800/60 bg-slate-950/40 p-4 text-sm text-slate-400">
+          議題がまだありません
+        </div>
+      )}
+    </section>
+  )
+}
+
+type SortableAgendaItemProps = {
+  agenda: AgendaRecord
+  onDelete: (id: string) => void
+  onUpdateStatus: (id: string, status: string) => void
+}
+
+function SortableAgendaItem({ agenda, onDelete, onUpdateStatus }: SortableAgendaItemProps) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: agenda.id,
+  })
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  }
+
+  const statusColors = {
+    pending: 'border-slate-800/60 bg-slate-950/40',
+    current: 'border-emerald-500/40 bg-emerald-500/10',
+    completed: 'border-slate-700/40 bg-slate-800/40 opacity-60',
+  }
+
+  return (
+    <li
+      ref={setNodeRef}
+      style={style}
+      className={`rounded-xl border p-4 ${statusColors[agenda.status]}`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex flex-1 items-start gap-3">
+          <button
+            type="button"
+            {...attributes}
+            {...listeners}
+            className="mt-1 cursor-grab text-slate-500 hover:text-slate-300 active:cursor-grabbing"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              className="h-4 w-4"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M4 6h16M4 12h16M4 18h16"
+              />
+            </svg>
+          </button>
+          <div className="flex-1">
+            <p className="text-sm font-semibold text-slate-50">{agenda.title}</p>
+            <div className="mt-2 flex gap-2">
+              <button
+                type="button"
+                onClick={() => onUpdateStatus(agenda.id, 'pending')}
+                disabled={agenda.status === 'pending'}
+                className="text-xs text-slate-400 hover:text-slate-200 disabled:opacity-50"
+              >
+                Pending
+              </button>
+              <button
+                type="button"
+                onClick={() => onUpdateStatus(agenda.id, 'current')}
+                disabled={agenda.status === 'current'}
+                className="text-xs text-emerald-400 hover:text-emerald-200 disabled:opacity-50"
+              >
+                Current
+              </button>
+              <button
+                type="button"
+                onClick={() => onUpdateStatus(agenda.id, 'completed')}
+                disabled={agenda.status === 'completed'}
+                className="text-xs text-slate-400 hover:text-slate-200 disabled:opacity-50"
+              >
+                Completed
+              </button>
+            </div>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => onDelete(agenda.id)}
+          className="text-xs font-semibold text-rose-400 hover:text-rose-200"
+        >
+          Delete
+        </button>
+      </div>
+    </li>
+  )
+}
+
+type SuggestionPanelProps = {
+  sessionId?: string
+}
+
+function SuggestionPanel({ sessionId }: SuggestionPanelProps) {
+  const [suggestions, setSuggestions] = useState<SuggestionRecord[]>([])
+  const [isLoading, setIsLoading] = useState(false)
+  const [isGenerating, setIsGenerating] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const loadSuggestions = useCallback(async () => {
+    if (!sessionId) {
+      setSuggestions([])
+      return
+    }
+
+    try {
+      setIsLoading(true)
+      setError(null)
+      const records = await window.sanma.getSuggestions({ sessionId, limit: 5 })
+      setSuggestions(records)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      console.error('[sanma] failed to load suggestions', err)
+    } finally {
+      setIsLoading(false)
+    }
+  }, [sessionId])
+
+  useEffect(() => {
+    void loadSuggestions()
+  }, [loadSuggestions])
+
+  const handleGenerateSuggestion = useCallback(async () => {
+    if (!sessionId) return
+
+    try {
+      setIsGenerating(true)
+      setError(null)
+      const suggestion = await window.sanma.generateSuggestion({ sessionId })
+      setSuggestions((prev) => [suggestion, ...prev.slice(0, 4)])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      console.error('[sanma] failed to generate suggestion', err)
+    } finally {
+      setIsGenerating(false)
+    }
+  }, [sessionId])
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key === 'j') {
+        event.preventDefault()
+        void handleGenerateSuggestion()
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [handleGenerateSuggestion])
+
+  if (!sessionId) {
+    return null
+  }
+
+  const latestSuggestion = suggestions[0]
+
+  return (
+    <section className="space-y-4 text-left">
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">AI Suggestions</h2>
+          <p className="text-xs text-slate-500">Press ⌘J to generate suggestions</p>
+        </div>
+        <button
+          type="button"
+          onClick={handleGenerateSuggestion}
+          disabled={isGenerating}
+          className="rounded-lg border border-violet-500/40 bg-violet-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-violet-100 transition hover:bg-violet-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {isGenerating ? 'Generating…' : 'Generate (⌘J)'}
+        </button>
+      </div>
+
+      {error ? (
+        <div className="rounded-lg border border-rose-400/50 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+          {error}
+        </div>
+      ) : null}
+
+      {isGenerating ? (
+        <div className="rounded-xl border border-violet-500/40 bg-violet-500/10 p-4 text-sm text-violet-100">
+          AI is generating suggestions...
+        </div>
+      ) : null}
+
+      {latestSuggestion ? (
+        <div className="space-y-3 rounded-xl border border-violet-500/40 bg-violet-500/10 p-4">
+          <div>
+            <p className="text-xs uppercase tracking-wide text-violet-300">Summary</p>
+            <p className="mt-1 text-sm text-violet-50">{latestSuggestion.summary}</p>
+          </div>
+
+          <div>
+            <p className="text-xs uppercase tracking-wide text-violet-300">Bridging Question</p>
+            <p className="mt-1 text-sm text-violet-50">{latestSuggestion.bridgingQuestion}</p>
+          </div>
+
+          {latestSuggestion.followUpQuestions.length > 0 ? (
+            <div>
+              <p className="text-xs uppercase tracking-wide text-violet-300">Follow-up Questions</p>
+              <ul className="mt-1 space-y-1 text-sm text-violet-50">
+                {latestSuggestion.followUpQuestions.map((question, index) => (
+                  <li key={index}>• {question}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          <p className="text-[11px] text-violet-300">
+            Generated at {new Date(latestSuggestion.createdAt).toLocaleTimeString()}
+          </p>
+        </div>
+      ) : null}
+
+      {suggestions.length > 1 ? (
+        <details className="rounded-xl border border-slate-800/60 bg-slate-950/40 p-4">
+          <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-slate-400">
+            History ({suggestions.length - 1} previous)
+          </summary>
+          <ul className="mt-3 space-y-3">
+            {suggestions.slice(1).map((suggestion) => (
+              <li key={suggestion.id} className="rounded-lg border border-slate-800/40 bg-slate-900/40 p-3">
+                <p className="text-xs text-slate-400">{suggestion.summary}</p>
+                <p className="mt-1 text-[10px] text-slate-500">
+                  {new Date(suggestion.createdAt).toLocaleString()}
+                </p>
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : isLoading ? (
+        <div className="rounded-xl border border-slate-800/60 bg-slate-950/40 p-4 text-sm text-slate-300">
+          Loading suggestions...
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
 type RecorderStatus = 'idle' | 'initializing' | 'recording' | 'denied' | 'unsupported' | 'error'
 type TranscriptionStatus = 'idle' | 'pending' | 'error'
 
@@ -220,7 +679,11 @@ type RecordingSummary = {
   durationMs: number
 }
 
-function MicrophonePanel() {
+type MicrophonePanelProps = {
+  sessionId?: string
+}
+
+function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
   const supportsMediaRecorder = useMemo(() => {
     if (typeof navigator === 'undefined' || typeof window === 'undefined') {
       return false
@@ -315,12 +778,27 @@ function MicrophonePanel() {
         })
         setTranscription(result)
         setTranscriptionStatus('idle')
+
+        // Save transcription to database
+        if (sessionId && result.text) {
+          try {
+            await window.sanma.saveTranscription({
+              sessionId,
+              text: result.text,
+              locale: result.locale,
+              confidence: result.confidence,
+            })
+            console.log('[sanma] Transcription saved to database')
+          } catch (err) {
+            console.error('[sanma] Failed to save transcription:', err)
+          }
+        }
       } catch (error) {
         setTranscriptionStatus('error')
         setTranscriptionError(error instanceof Error ? error.message : String(error))
       }
     },
-    [],
+    [sessionId],
   )
 
   const startRecording = useCallback(async () => {

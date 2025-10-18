@@ -1,3 +1,4 @@
+import 'dotenv/config'
 import { app, BrowserWindow, ipcMain } from 'electron'
 import { spawn } from 'node:child_process'
 import { join, dirname, resolve as resolvePath } from 'node:path'
@@ -6,7 +7,8 @@ import { createRequire } from 'node:module'
 import { mkdirSync, existsSync, promises as fsPromises } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
-import type { SessionRecord, TranscriptionResult } from './shared/types'
+import { GoogleGenerativeAI } from '@google/generative-ai'
+import type { SessionRecord, AgendaRecord, TranscriptionResult, SuggestionRecord, TranscriptionRecord } from './shared/types'
 import type { Database as BetterSqliteDatabase } from 'better-sqlite3'
 
 const require = createRequire(import.meta.url)
@@ -21,6 +23,23 @@ let cachedDbPath: string | null = null
 let db: BetterSqliteDatabase | null = null
 let isDbInitialized = false
 type SessionDbRow = { id: string; title: string; created_at: number }
+type AgendaDbRow = { id: string; session_id: string; title: string; order: number; status: string; created_at: number }
+type SuggestionDbRow = {
+  id: string
+  session_id: string
+  summary: string
+  bridging_question: string
+  follow_up_questions: string
+  created_at: number
+}
+type TranscriptionDbRow = {
+  id: string
+  session_id: string
+  text: string
+  locale: string
+  confidence: number
+  created_at: number
+}
 
 const resolveDbPath = () => {
   if (!cachedDbPath) {
@@ -61,6 +80,54 @@ const ensureSchema = (database: BetterSqliteDatabase) => {
       title TEXT NOT NULL,
       created_at INTEGER NOT NULL
     )
+  `)
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS agendas (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      "order" INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    )
+  `)
+
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_agendas_session_order ON agendas(session_id, "order")
+  `)
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS suggestions (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      bridging_question TEXT NOT NULL,
+      follow_up_questions TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    )
+  `)
+
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_suggestions_session ON suggestions(session_id, created_at DESC)
+  `)
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS transcriptions (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      text TEXT NOT NULL,
+      locale TEXT NOT NULL,
+      confidence REAL NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    )
+  `)
+
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_transcriptions_session ON transcriptions(session_id, created_at DESC)
   `)
 }
 
@@ -111,12 +178,295 @@ const createSession = (input: { title?: string } = {}): SessionRecord => {
   }
 }
 
+const mapAgendaRow = (row: AgendaDbRow): AgendaRecord => ({
+  id: row.id,
+  sessionId: row.session_id,
+  title: row.title,
+  order: row.order,
+  status: row.status as 'pending' | 'current' | 'completed',
+  createdAt: row.created_at,
+})
+
+const listAgendas = (sessionId: string): AgendaRecord[] => {
+  const database = openDatabase()
+  const rows = database
+    .prepare<[string], AgendaDbRow>('SELECT id, session_id, title, "order", status, created_at FROM agendas WHERE session_id = ? ORDER BY "order" ASC')
+    .all(sessionId)
+
+  return rows.map(mapAgendaRow)
+}
+
+const createAgenda = (input: { sessionId: string; title: string }): AgendaRecord => {
+  const database = openDatabase()
+  const { sessionId, title } = input
+
+  if (!title?.trim()) {
+    throw new Error('Agenda title is required')
+  }
+
+  const maxOrderRow = database
+    .prepare<[string], { max_order: number | null }>('SELECT MAX("order") AS max_order FROM agendas WHERE session_id = ?')
+    .get(sessionId)
+
+  const order = (maxOrderRow?.max_order ?? -1) + 1
+  const now = Date.now()
+  const id = randomUUID()
+
+  database
+    .prepare<[string, string, string, number, string, number]>(
+      'INSERT INTO agendas (id, session_id, title, "order", status, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+    )
+    .run(id, sessionId, title.trim(), order, 'pending', now)
+
+  return {
+    id,
+    sessionId,
+    title: title.trim(),
+    order,
+    status: 'pending',
+    createdAt: now,
+  }
+}
+
+const updateAgenda = (input: { id: string; title?: string; status?: string }): AgendaRecord => {
+  const database = openDatabase()
+  const { id, title, status } = input
+
+  const existingRow = database
+    .prepare<[string], AgendaDbRow>('SELECT id, session_id, title, "order", status, created_at FROM agendas WHERE id = ?')
+    .get(id)
+
+  if (!existingRow) {
+    throw new Error('Agenda not found')
+  }
+
+  const newTitle = title?.trim() ?? existingRow.title
+  const newStatus = status ?? existingRow.status
+
+  database
+    .prepare<[string, string, string]>('UPDATE agendas SET title = ?, status = ? WHERE id = ?')
+    .run(newTitle, newStatus, id)
+
+  return {
+    ...mapAgendaRow(existingRow),
+    title: newTitle,
+    status: newStatus as 'pending' | 'current' | 'completed',
+  }
+}
+
+const deleteAgenda = (id: string): void => {
+  const database = openDatabase()
+  database.prepare<[string]>('DELETE FROM agendas WHERE id = ?').run(id)
+}
+
+const reorderAgendas = (input: { sessionId: string; agendaIds: string[] }): AgendaRecord[] => {
+  const database = openDatabase()
+  const { sessionId, agendaIds } = input
+
+  const updateStmt = database.prepare<[number, string]>('UPDATE agendas SET "order" = ? WHERE id = ?')
+
+  const transaction = database.transaction((ids: string[]) => {
+    ids.forEach((agendaId, index) => {
+      updateStmt.run(index, agendaId)
+    })
+  })
+
+  transaction(agendaIds)
+
+  return listAgendas(sessionId)
+}
+
+const mapSuggestionRow = (row: SuggestionDbRow): SuggestionRecord => ({
+  id: row.id,
+  sessionId: row.session_id,
+  summary: row.summary,
+  bridgingQuestion: row.bridging_question,
+  followUpQuestions: JSON.parse(row.follow_up_questions) as string[],
+  createdAt: row.created_at,
+})
+
+const listSuggestions = (sessionId: string, limit = 5): SuggestionRecord[] => {
+  const database = openDatabase()
+  const rows = database
+    .prepare<[string, number], SuggestionDbRow>(
+      'SELECT id, session_id, summary, bridging_question, follow_up_questions, created_at FROM suggestions WHERE session_id = ? ORDER BY created_at DESC LIMIT ?'
+    )
+    .all(sessionId, limit)
+
+  return rows.map(mapSuggestionRow)
+}
+
+const createSuggestion = (input: {
+  sessionId: string
+  summary: string
+  bridgingQuestion: string
+  followUpQuestions: string[]
+}): SuggestionRecord => {
+  const database = openDatabase()
+  const { sessionId, summary, bridgingQuestion, followUpQuestions } = input
+
+  const now = Date.now()
+  const id = randomUUID()
+  const followUpQuestionsJson = JSON.stringify(followUpQuestions)
+
+  database
+    .prepare<[string, string, string, string, string, number]>(
+      'INSERT INTO suggestions (id, session_id, summary, bridging_question, follow_up_questions, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+    )
+    .run(id, sessionId, summary, bridgingQuestion, followUpQuestionsJson, now)
+
+  return {
+    id,
+    sessionId,
+    summary,
+    bridgingQuestion,
+    followUpQuestions,
+    createdAt: now,
+  }
+}
+
+const mapTranscriptionRow = (row: TranscriptionDbRow): TranscriptionRecord => ({
+  id: row.id,
+  sessionId: row.session_id,
+  text: row.text,
+  locale: row.locale,
+  confidence: row.confidence,
+  createdAt: row.created_at,
+})
+
+const createTranscription = (input: {
+  sessionId: string
+  text: string
+  locale: string
+  confidence: number
+}): TranscriptionRecord => {
+  const database = openDatabase()
+  const { sessionId, text, locale, confidence } = input
+
+  const now = Date.now()
+  const id = randomUUID()
+
+  database
+    .prepare<[string, string, string, string, number, number]>(
+      'INSERT INTO transcriptions (id, session_id, text, locale, confidence, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+    )
+    .run(id, sessionId, text, locale, confidence, now)
+
+  return {
+    id,
+    sessionId,
+    text,
+    locale,
+    confidence,
+    createdAt: now,
+  }
+}
+
+const getRecentTranscriptions = (sessionId: string, secondsAgo = 180): TranscriptionRecord[] => {
+  const database = openDatabase()
+  const cutoffTime = Date.now() - secondsAgo * 1000
+
+  const rows = database
+    .prepare<[string, number], TranscriptionDbRow>(
+      'SELECT id, session_id, text, locale, confidence, created_at FROM transcriptions WHERE session_id = ? AND created_at >= ? ORDER BY created_at ASC'
+    )
+    .all(sessionId, cutoffTime)
+
+  return rows.map(mapTranscriptionRow)
+}
+
+const generateAiSuggestion = async (input: {
+  sessionId: string
+  currentAgendaTitle?: string
+  nextAgendaTitle?: string
+}): Promise<SuggestionRecord> => {
+  const apiKey = process.env.GOOGLE_API_KEY
+
+  if (!apiKey) {
+    throw new Error('GOOGLE_API_KEY is not set in environment variables')
+  }
+
+  // Fetch recent transcriptions from the database (last 120-180 seconds)
+  const transcriptions = getRecentTranscriptions(input.sessionId, 180)
+  const recentTranscriptions = transcriptions.length > 0
+    ? transcriptions.map((t) => t.text).join('\n')
+    : '（まだ会話内容がありません）'
+
+  const genAI = new GoogleGenerativeAI(apiKey)
+  const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' })
+
+  const prompt = `あなたは会議のファシリテーターアシスタントです。以下の会話内容を元に、簡潔な提案を生成してください。
+
+現在の議題: ${input.currentAgendaTitle ?? '未設定'}
+次の議題: ${input.nextAgendaTitle ?? '未設定'}
+
+最近の会話内容（直近3分間）:
+${recentTranscriptions}
+
+以下の形式でJSON形式で回答してください：
+{
+  "summary": "100〜160字の要約",
+  "bridgingQuestion": "現在の議題から次の議題への繋ぎの質問",
+  "followUpQuestions": ["追加質問1", "追加質問2"]
+}
+
+JSON以外の文字は含めないでください。`
+
+  const result = await model.generateContent(prompt)
+  const response = result.response
+  const text = response.text()
+
+  let parsed: { summary: string; bridgingQuestion: string; followUpQuestions: string[] }
+
+  try {
+    // JSONブロックから抽出を試みる
+    const jsonMatch = text.match(/\{[\s\S]*\}/)
+    if (jsonMatch) {
+      parsed = JSON.parse(jsonMatch[0])
+    } else {
+      parsed = JSON.parse(text)
+    }
+  } catch (error) {
+    console.error('[AI] Failed to parse response:', text)
+    throw new Error(`Failed to parse AI response: ${(error as Error).message}`)
+  }
+
+  return createSuggestion({
+    sessionId: input.sessionId,
+    summary: parsed.summary,
+    bridgingQuestion: parsed.bridgingQuestion,
+    followUpQuestions: parsed.followUpQuestions,
+  })
+}
+
 const registerIpcHandlers = () => {
   openDatabase()
 
   ipcMain.handle('sanma:get-db-path', () => resolveDbPath())
   ipcMain.handle('sanma:get-sessions', () => listSessions())
   ipcMain.handle('sanma:create-session', (_event, payload: { title?: string }) => createSession(payload ?? {}))
+
+  ipcMain.handle('sanma:get-agendas', (_event, payload: { sessionId: string }) => listAgendas(payload.sessionId))
+  ipcMain.handle('sanma:create-agenda', (_event, payload: { sessionId: string; title: string }) => createAgenda(payload))
+  ipcMain.handle('sanma:update-agenda', (_event, payload: { id: string; title?: string; status?: string }) => updateAgenda(payload))
+  ipcMain.handle('sanma:delete-agenda', (_event, payload: { id: string }) => deleteAgenda(payload.id))
+  ipcMain.handle('sanma:reorder-agendas', (_event, payload: { sessionId: string; agendaIds: string[] }) => reorderAgendas(payload))
+
+  ipcMain.handle('sanma:get-suggestions', (_event, payload: { sessionId: string; limit?: number }) =>
+    listSuggestions(payload.sessionId, payload.limit)
+  )
+  ipcMain.handle(
+    'sanma:generate-suggestion',
+    async (_event, payload: { sessionId: string; currentAgendaTitle?: string; nextAgendaTitle?: string }) =>
+      generateAiSuggestion(payload)
+  )
+
+  ipcMain.handle(
+    'sanma:save-transcription',
+    (_event, payload: { sessionId: string; text: string; locale: string; confidence: number }) =>
+      createTranscription(payload)
+  )
+
   ipcMain.handle('sanma:transcribe-audio', async (_event, payload: { path: string; locale?: string }) => {
     if (!payload?.path) {
       throw new Error('Audio path is required')

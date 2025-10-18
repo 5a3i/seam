@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { SessionRecord, TranscriptionResult } from './shared/types'
+import type { SessionRecord, AgendaRecord, TranscriptionResult, SuggestionRecord } from './shared/types'
 
 const api = {
   ping: () => 'pong',
@@ -13,6 +13,22 @@ const api = {
   getSessions: () => ipcRenderer.invoke('sanma:get-sessions') as Promise<SessionRecord[]>,
   createSession: (payload: { title?: string }) =>
     ipcRenderer.invoke('sanma:create-session', payload) as Promise<SessionRecord>,
+  getAgendas: (payload: { sessionId: string }) =>
+    ipcRenderer.invoke('sanma:get-agendas', payload) as Promise<AgendaRecord[]>,
+  createAgenda: (payload: { sessionId: string; title: string }) =>
+    ipcRenderer.invoke('sanma:create-agenda', payload) as Promise<AgendaRecord>,
+  updateAgenda: (payload: { id: string; title?: string; status?: string }) =>
+    ipcRenderer.invoke('sanma:update-agenda', payload) as Promise<AgendaRecord>,
+  deleteAgenda: (payload: { id: string }) =>
+    ipcRenderer.invoke('sanma:delete-agenda', payload) as Promise<void>,
+  reorderAgendas: (payload: { sessionId: string; agendaIds: string[] }) =>
+    ipcRenderer.invoke('sanma:reorder-agendas', payload) as Promise<AgendaRecord[]>,
+  getSuggestions: (payload: { sessionId: string; limit?: number }) =>
+    ipcRenderer.invoke('sanma:get-suggestions', payload) as Promise<SuggestionRecord[]>,
+  generateSuggestion: (payload: { sessionId: string; currentAgendaTitle?: string; nextAgendaTitle?: string }) =>
+    ipcRenderer.invoke('sanma:generate-suggestion', payload) as Promise<SuggestionRecord>,
+  saveTranscription: (payload: { sessionId: string; text: string; locale: string; confidence: number }) =>
+    ipcRenderer.invoke('sanma:save-transcription', payload) as Promise<TranscriptionRecord>,
   transcribeAudio: (payload: { data: Uint8Array; mimeType: string; locale?: string }) =>
     ipcRenderer.invoke('sanma:transcribe-buffer', {
       data: Buffer.from(payload.data),
