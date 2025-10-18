@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { SessionRecord } from '../shared/types'
+import type { SessionRecord, TranscriptionResult } from '../shared/types'
 
 const fallbackVersions = {
   node: '-',
@@ -210,6 +210,7 @@ function StatCard({ label, value }: StatCardProps) {
 }
 
 type RecorderStatus = 'idle' | 'initializing' | 'recording' | 'denied' | 'unsupported' | 'error'
+type TranscriptionStatus = 'idle' | 'pending' | 'error'
 
 type RecordingSummary = {
   url: string
@@ -227,12 +228,24 @@ function MicrophonePanel() {
     return Boolean(navigator.mediaDevices?.getUserMedia) && 'MediaRecorder' in window
   }, [])
 
+  const preferredMimeTypes = useMemo(
+    () => [
+      'audio/mp4;codecs=mp4a.40.2',
+      'audio/mp4',
+      'audio/aac',
+      'audio/webm;codecs=opus',
+      'audio/webm',
+    ],
+    [],
+  )
+
   const recorderRef = useRef<MediaRecorder | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const timerRef = useRef<number | null>(null)
   const startTimestampRef = useRef<number | null>(null)
   const chunksRef = useRef<BlobPart[]>([])
   const lastRecordingUrlRef = useRef<string | null>(null)
+  const mimeTypeRef = useRef<string>('audio/webm')
 
   const [status, setStatus] = useState<RecorderStatus>(() =>
     supportsMediaRecorder ? 'idle' : 'unsupported',
@@ -240,6 +253,9 @@ function MicrophonePanel() {
   const [elapsedMs, setElapsedMs] = useState(0)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [latestRecording, setLatestRecording] = useState<RecordingSummary | null>(null)
+  const [transcriptionStatus, setTranscriptionStatus] = useState<TranscriptionStatus>('idle')
+  const [transcription, setTranscription] = useState<TranscriptionResult | null>(null)
+  const [transcriptionError, setTranscriptionError] = useState<string | null>(null)
 
   const cleanup = useCallback(
     (options: { resetElapsed?: boolean } = {}) => {
@@ -254,7 +270,7 @@ function MicrophonePanel() {
             recorderRef.current.stop()
           }
         } catch {
-          // ignore if already stopped
+          // recorder might already be stopped
         }
         recorderRef.current = null
       }
@@ -284,20 +300,50 @@ function MicrophonePanel() {
     }
   }, [cleanup])
 
+  const transcribeBlob = useCallback(
+    async (blob: Blob) => {
+      setTranscription(null)
+      setTranscriptionError(null)
+      setTranscriptionStatus('pending')
+
+      try {
+        const arrayBuffer = await blob.arrayBuffer()
+        const payload = new Uint8Array(arrayBuffer)
+        const result = await window.sanma.transcribeAudio({
+          data: payload,
+          mimeType: blob.type || mimeTypeRef.current,
+        })
+        setTranscription(result)
+        setTranscriptionStatus('idle')
+      } catch (error) {
+        setTranscriptionStatus('error')
+        setTranscriptionError(error instanceof Error ? error.message : String(error))
+      }
+    },
+    [],
+  )
+
   const startRecording = useCallback(async () => {
     if (!supportsMediaRecorder || status === 'recording' || status === 'initializing') {
       return
     }
 
     setErrorMessage(null)
+    setTranscription(null)
+    setTranscriptionError(null)
+    setTranscriptionStatus('idle')
 
     try {
       setStatus('initializing')
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       streamRef.current = stream
 
-      const recorder = new MediaRecorder(stream)
+      const supportedType = preferredMimeTypes.find((type) => MediaRecorder.isTypeSupported(type))
+      const recorder = supportedType
+        ? new MediaRecorder(stream, { mimeType: supportedType })
+        : new MediaRecorder(stream)
       recorderRef.current = recorder
+      mimeTypeRef.current = recorder.mimeType || supportedType || 'audio/webm'
       chunksRef.current = []
       startTimestampRef.current = Date.now()
 
@@ -315,28 +361,30 @@ function MicrophonePanel() {
 
         const durationMs =
           startTimestampRef.current !== null ? Date.now() - startTimestampRef.current : elapsedMs
-        const blobParts = chunksRef.current.slice()
-        const mimeType = recorder.mimeType || 'audio/webm'
+        const parts = chunksRef.current.slice()
+        const mimeType = recorder.mimeType || mimeTypeRef.current || 'audio/webm'
 
         recorder.removeEventListener('dataavailable', handleData)
         recorder.removeEventListener('stop', handleStop)
 
         cleanup({ resetElapsed: true })
 
-        const blob = new Blob(blobParts, { type: mimeType })
+        const blob = new Blob(parts, { type: mimeType })
         if (blob.size > 0) {
           if (lastRecordingUrlRef.current) {
             URL.revokeObjectURL(lastRecordingUrlRef.current)
           }
           const url = URL.createObjectURL(blob)
           lastRecordingUrlRef.current = url
-          setLatestRecording({
+          const summary: RecordingSummary = {
             url,
             size: blob.size,
             mimeType: blob.type,
             createdAt: Date.now(),
             durationMs,
-          })
+          }
+          setLatestRecording(summary)
+          void transcribeBlob(blob)
         }
 
         setStatus('idle')
@@ -363,7 +411,7 @@ function MicrophonePanel() {
         )
       }
     }
-  }, [cleanup, elapsedMs, status, supportsMediaRecorder])
+  }, [cleanup, elapsedMs, preferredMimeTypes, status, supportsMediaRecorder, transcribeBlob])
 
   const stopRecording = useCallback(() => {
     if (status !== 'recording' && status !== 'initializing') {
@@ -384,6 +432,9 @@ function MicrophonePanel() {
       lastRecordingUrlRef.current = null
     }
     setLatestRecording(null)
+    setTranscription(null)
+    setTranscriptionError(null)
+    setTranscriptionStatus('idle')
   }, [])
 
   const formatDuration = (durationMs: number) => {
@@ -474,6 +525,45 @@ function MicrophonePanel() {
             {latestRecording.mimeType} · {(latestRecording.size / 1024).toFixed(1)} KB ·{' '}
             {new Date(latestRecording.createdAt).toLocaleTimeString()}
           </p>
+        </div>
+      ) : null}
+
+      {transcriptionStatus === 'pending' ? (
+        <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-4 text-sm text-emerald-100">
+          音声を文字起こししています…
+        </div>
+      ) : null}
+
+      {transcription ? (
+        <div className="space-y-2 rounded-xl border border-slate-800/60 bg-slate-950/40 p-4">
+          <p className="text-xs uppercase tracking-wide text-slate-500">Transcription</p>
+          <p className="text-sm leading-relaxed text-slate-100 whitespace-pre-wrap">
+            {transcription.text}
+          </p>
+          <p className="text-[11px] text-slate-500">
+            Locale: {transcription.locale} · Confidence: {(transcription.confidence * 100).toFixed(1)}%
+          </p>
+          {transcription.segments.length > 0 ? (
+            <details className="text-xs text-slate-400">
+              <summary className="cursor-pointer select-none text-slate-300">Segments</summary>
+              <ul className="mt-2 space-y-1">
+                {transcription.segments.slice(0, 5).map((segment, index) => (
+                  <li key={`${segment.timestamp}-${index}`} className="rounded border border-slate-800/60 bg-slate-900/40 p-2">
+                    <span className="font-semibold text-slate-200">{segment.substring}</span>
+                    <span className="ml-2 text-[10px] text-slate-500">
+                      {segment.timestamp.toFixed(2)}s · conf {(segment.confidence * 100).toFixed(1)}%
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
+        </div>
+      ) : null}
+
+      {transcriptionError ? (
+        <div className="rounded-xl border border-rose-400/50 bg-rose-500/10 p-4 text-sm text-rose-200">
+          {transcriptionError}
         </div>
       ) : null}
     </section>

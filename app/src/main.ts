@@ -1,10 +1,12 @@
 import { app, BrowserWindow, ipcMain } from 'electron'
-import { join, dirname } from 'node:path'
+import { spawn } from 'node:child_process'
+import { join, dirname, resolve as resolvePath } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, existsSync, promises as fsPromises } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
-import type { SessionRecord } from './shared/types'
+import type { SessionRecord, TranscriptionResult } from './shared/types'
 import type { Database as BetterSqliteDatabase } from 'better-sqlite3'
 
 const require = createRequire(import.meta.url)
@@ -115,6 +117,53 @@ const registerIpcHandlers = () => {
   ipcMain.handle('sanma:get-db-path', () => resolveDbPath())
   ipcMain.handle('sanma:get-sessions', () => listSessions())
   ipcMain.handle('sanma:create-session', (_event, payload: { title?: string }) => createSession(payload ?? {}))
+  ipcMain.handle('sanma:transcribe-audio', async (_event, payload: { path: string; locale?: string }) => {
+    if (!payload?.path) {
+      throw new Error('Audio path is required')
+    }
+
+    return transcribeAudioFile(payload.path, payload.locale)
+  })
+  ipcMain.handle(
+    'sanma:transcribe-buffer',
+    async (
+      _event,
+      payload: { data: ArrayBuffer | Uint8Array | Buffer; mimeType: string; locale?: string },
+    ) => {
+      if (!payload?.data) {
+        throw new Error('Audio buffer is required')
+      }
+
+      const buffer = normalizeToBuffer(payload.data)
+      if (!buffer || buffer.length === 0) {
+        throw new Error('Audio buffer is required')
+      }
+
+      const mimeType = payload.mimeType ?? 'audio/mp4'
+      const extension = extensionFromMime(mimeType)
+      const tempPath = join(tmpdir(), `sanma-audio-${randomUUID()}.${extension}`)
+
+      console.log('[transcribe-buffer] Writing audio buffer:', {
+        size: buffer.length,
+        mimeType,
+        extension,
+        tempPath,
+      })
+
+      await fsPromises.writeFile(tempPath, buffer)
+
+      // Also save a copy for debugging
+      const debugPath = join(app.getPath('userData'), `debug-audio-latest.${extension}`)
+      await fsPromises.writeFile(debugPath, buffer).catch(() => undefined)
+      console.log('[transcribe-buffer] Debug copy saved to:', debugPath)
+
+      try {
+        return await transcribeAudioFile(tempPath, payload.locale)
+      } finally {
+        await fsPromises.unlink(tempPath).catch(() => undefined)
+      }
+    },
+  )
 }
 
 const createWindow = async () => {
@@ -161,3 +210,93 @@ app.on('window-all-closed', () => {
     app.quit()
   }
 })
+
+const resolveSpeechBinary = () => {
+  if (process.env.SANMA_SPEECH_BIN) {
+    return process.env.SANMA_SPEECH_BIN
+  }
+
+  const baseDir = app.isPackaged ? app.getAppPath() : join(app.getAppPath(), '..')
+  return resolvePath(baseDir, 'native', 'speech', '.build', 'debug', 'speech')
+}
+
+const runProcess = (command: string, args: string[]) =>
+  new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+
+    let stdout = ''
+    let stderr = ''
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString()
+    })
+
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString()
+    })
+
+    child.on('error', (error) => {
+      reject(error)
+    })
+
+    child.on('close', (code) => {
+      resolve({ stdout, stderr, exitCode: code ?? 0 })
+    })
+  })
+
+const transcribeAudioFile = async (audioPath: string, locale?: string): Promise<TranscriptionResult> => {
+  const binary = resolveSpeechBinary()
+
+  if (!existsSync(binary)) {
+    throw new Error(`Speech binary not found at ${binary}. Build it with "swift build" inside native/speech.`)
+  }
+
+  const args = [audioPath, '--json', '--timeout=60']
+  if (locale) {
+    args.push(`--locale=${locale}`)
+  }
+
+  console.log('[transcribe] Running speech binary:', binary, 'with args:', args)
+  const result = await runProcess(binary, args)
+  console.log('[transcribe] Exit code:', result.exitCode, 'stdout length:', result.stdout.length, 'stderr:', result.stderr)
+
+  if (result.exitCode !== 0) {
+    const message = result.stderr.trim() || `Speech process exited with code ${result.exitCode}`
+    throw new Error(message)
+  }
+
+  const output = result.stdout.trim()
+  if (!output) {
+    const errorHint = result.stderr.trim()
+      ? `\nBinary error output: ${result.stderr.trim()}`
+      : '\nThe speech binary produced no output. This may indicate an unsupported audio format (WebM/Ogg are not supported by macOS Speech framework - use M4A/AAC/MP4 instead).'
+    throw new Error(`Speech binary produced no output.${errorHint}`)
+  }
+
+  try {
+    return JSON.parse(output) as TranscriptionResult
+  } catch (error) {
+    throw new Error(`Failed to parse speech output: ${(error as Error).message}\nOutput received: ${output.substring(0, 200)}`)
+  }
+}
+
+const extensionFromMime = (mimeType: string) => {
+  const normalized = mimeType.toLowerCase()
+  if (normalized.includes('wav')) return 'wav'
+  if (normalized.includes('m4a') || normalized.includes('aac')) return 'm4a'
+  if (normalized.includes('mp4')) return 'm4a'
+  if (normalized.includes('webm')) return 'webm'
+  if (normalized.includes('ogg')) return 'ogg'
+  return 'm4a'
+}
+
+const normalizeToBuffer = (source: ArrayBuffer | Uint8Array | Buffer) => {
+  if (Buffer.isBuffer(source)) return source
+  if (source instanceof Uint8Array) {
+    return Buffer.from(source.buffer, source.byteOffset, source.byteLength)
+  }
+  if (source instanceof ArrayBuffer) {
+    return Buffer.from(source)
+  }
+  return null
+}

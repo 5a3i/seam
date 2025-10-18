@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { SessionRecord } from './shared/types'
+import type { SessionRecord, TranscriptionResult } from './shared/types'
 
 const api = {
   ping: () => 'pong',
@@ -13,6 +13,12 @@ const api = {
   getSessions: () => ipcRenderer.invoke('sanma:get-sessions') as Promise<SessionRecord[]>,
   createSession: (payload: { title?: string }) =>
     ipcRenderer.invoke('sanma:create-session', payload) as Promise<SessionRecord>,
+  transcribeAudio: (payload: { data: Uint8Array; mimeType: string; locale?: string }) =>
+    ipcRenderer.invoke('sanma:transcribe-buffer', {
+      data: Buffer.from(payload.data),
+      mimeType: payload.mimeType,
+      locale: payload.locale,
+    }) as Promise<TranscriptionResult>,
 } as const
 
 contextBridge.exposeInMainWorld('sanma', api)
