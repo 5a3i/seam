@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { SessionRecord, AgendaRecord, TranscriptionResult, SuggestionRecord } from './shared/types'
+import type { SessionRecord, AgendaRecord, TranscriptionResult, TranscriptionRecord, SuggestionRecord } from './shared/types'
 
 const api = {
   ping: () => 'pong',

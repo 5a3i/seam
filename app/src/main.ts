@@ -422,9 +422,22 @@ const generateAiSuggestion = async (input: {
 
   // Fetch recent transcriptions from the database (last 120-180 seconds)
   const transcriptions = getRecentTranscriptions(input.sessionId, 180)
+
+  console.log('[AI] Fetched transcriptions:', {
+    count: transcriptions.length,
+    sessionId: input.sessionId,
+    timestamps: transcriptions.map(t => ({
+      time: new Date(t.createdAt).toISOString(),
+      preview: t.text.substring(0, 30) + '...'
+    }))
+  })
+
   const recentTranscriptions = transcriptions.length > 0
     ? transcriptions.map((t) => t.text).join('\n')
     : '（まだ会話内容がありません）'
+
+  console.log('[AI] Combined transcriptions length:', recentTranscriptions.length, 'chars')
+  console.log('[AI] Combined transcriptions preview:', recentTranscriptions.substring(0, 200) + '...')
 
   const genAI = new GoogleGenerativeAI(apiKey)
   const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' })
@@ -445,6 +458,11 @@ ${recentTranscriptions}
 }
 
 JSON以外の文字は含めないでください。`
+
+  console.log('[AI] Full prompt being sent to Gemini:')
+  console.log('=====================================')
+  console.log(prompt)
+  console.log('=====================================')
 
   const result = await model.generateContent(prompt)
   const response = result.response
@@ -528,6 +546,12 @@ const registerIpcHandlers = () => {
         throw new Error('Audio buffer is required')
       }
 
+      // Check minimum size (50KB for 20-second chunks)
+      if (buffer.length < 50000) {
+        console.warn('[transcribe-buffer] Audio buffer too small, skipping:', buffer.length, 'bytes')
+        throw new Error(`Audio buffer too small: ${buffer.length} bytes (minimum 50KB required)`)
+      }
+
       const mimeType = payload.mimeType ?? 'audio/mp4'
       const extension = extensionFromMime(mimeType)
       const tempPath = join(tmpdir(), `sanma-audio-${randomUUID()}.${extension}`)
@@ -541,6 +565,13 @@ const registerIpcHandlers = () => {
 
       await fsPromises.writeFile(tempPath, buffer)
 
+      // Verify file was written
+      const stats = await fsPromises.stat(tempPath)
+      console.log('[transcribe-buffer] File written successfully:', stats.size, 'bytes')
+
+      // Wait a bit to ensure file is fully flushed to disk
+      await new Promise(resolve => setTimeout(resolve, 100))
+
       // Also save a copy for debugging
       const debugPath = join(app.getPath('userData'), `debug-audio-latest.${extension}`)
       await fsPromises.writeFile(debugPath, buffer).catch(() => undefined)
@@ -548,6 +579,15 @@ const registerIpcHandlers = () => {
 
       try {
         return await transcribeAudioFile(tempPath, payload.locale)
+      } catch (error) {
+        console.error('[transcribe-buffer] Transcription failed:', error)
+        console.error('[transcribe-buffer] File info:', {
+          path: tempPath,
+          size: stats.size,
+          mimeType,
+          exists: existsSync(tempPath)
+        })
+        throw error
       } finally {
         await fsPromises.unlink(tempPath).catch(() => undefined)
       }

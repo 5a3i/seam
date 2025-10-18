@@ -832,6 +832,9 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
   const chunksRef = useRef<BlobPart[]>([])
   const lastRecordingUrlRef = useRef<string | null>(null)
   const mimeTypeRef = useRef<string>('audio/webm')
+  const transcriptionQueueRef = useRef<boolean>(false)
+  const continuousCycleTimerRef = useRef<number | null>(null)
+  const continuousModeRef = useRef<boolean>(false)
 
   const [status, setStatus] = useState<RecorderStatus>(() =>
     supportsMediaRecorder ? 'idle' : 'unsupported',
@@ -842,12 +845,19 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
   const [transcriptionStatus, setTranscriptionStatus] = useState<TranscriptionStatus>('idle')
   const [transcription, setTranscription] = useState<TranscriptionResult | null>(null)
   const [transcriptionError, setTranscriptionError] = useState<string | null>(null)
+  const [continuousMode, setContinuousMode] = useState(false)
+  const [chunkCount, setChunkCount] = useState(0)
 
   const cleanup = useCallback(
-    (options: { resetElapsed?: boolean } = {}) => {
+    (options: { resetElapsed?: boolean; keepStream?: boolean } = {}) => {
       if (timerRef.current !== null) {
         window.clearInterval(timerRef.current)
         timerRef.current = null
+      }
+
+      if (continuousCycleTimerRef.current !== null) {
+        window.clearTimeout(continuousCycleTimerRef.current)
+        continuousCycleTimerRef.current = null
       }
 
       if (recorderRef.current) {
@@ -861,7 +871,7 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
         recorderRef.current = null
       }
 
-      if (streamRef.current) {
+      if (!options.keepStream && streamRef.current) {
         streamRef.current.getTracks().forEach((track) => track.stop())
         streamRef.current = null
       }
@@ -887,10 +897,12 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
   }, [cleanup])
 
   const transcribeBlob = useCallback(
-    async (blob: Blob) => {
-      setTranscription(null)
-      setTranscriptionError(null)
-      setTranscriptionStatus('pending')
+    async (blob: Blob, options: { isChunk?: boolean } = {}) => {
+      if (!options.isChunk) {
+        setTranscription(null)
+        setTranscriptionError(null)
+        setTranscriptionStatus('pending')
+      }
 
       try {
         const arrayBuffer = await blob.arrayBuffer()
@@ -899,8 +911,11 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
           data: payload,
           mimeType: blob.type || mimeTypeRef.current,
         })
-        setTranscription(result)
-        setTranscriptionStatus('idle')
+
+        if (!options.isChunk) {
+          setTranscription(result)
+          setTranscriptionStatus('idle')
+        }
 
         // Save transcription to database
         if (sessionId && result.text) {
@@ -911,20 +926,114 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
               locale: result.locale,
               confidence: result.confidence,
             })
-            console.log('[sanma] Transcription saved to database')
+            console.log('[sanma] Transcription saved to database', options.isChunk ? '(chunk)' : '')
           } catch (err) {
             console.error('[sanma] Failed to save transcription:', err)
           }
         }
       } catch (error) {
-        setTranscriptionStatus('error')
-        setTranscriptionError(error instanceof Error ? error.message : String(error))
+        if (!options.isChunk) {
+          setTranscriptionStatus('error')
+          setTranscriptionError(error instanceof Error ? error.message : String(error))
+        } else {
+          console.error('[sanma] Chunk transcription failed:', error)
+        }
       }
     },
     [sessionId],
   )
 
-  const startRecording = useCallback(async () => {
+  const transcribeChunk = useCallback(
+    async (blob: Blob) => {
+      if (transcriptionQueueRef.current) {
+        console.log('[sanma] Transcription already in progress, skipping chunk')
+        return
+      }
+
+      try {
+        transcriptionQueueRef.current = true
+        await transcribeBlob(blob, { isChunk: true })
+      } finally {
+        transcriptionQueueRef.current = false
+      }
+    },
+    [transcribeBlob],
+  )
+
+  const startContinuousRecordingCycle = useCallback(async () => {
+    if (!streamRef.current) {
+      console.error('[sanma] No stream available for continuous recording')
+      return
+    }
+
+    console.log('[sanma] Starting new continuous recording cycle...')
+
+    const stream = streamRef.current
+    const supportedType = preferredMimeTypes.find((type) => MediaRecorder.isTypeSupported(type))
+    const recorder = supportedType
+      ? new MediaRecorder(stream, { mimeType: supportedType })
+      : new MediaRecorder(stream)
+
+    recorderRef.current = recorder
+    mimeTypeRef.current = recorder.mimeType || supportedType || 'audio/webm'
+    chunksRef.current = []
+
+    const handleData = (event: BlobEvent) => {
+      if (event.data && event.data.size > 0) {
+        console.log(`[sanma] Received data chunk: ${(event.data.size / 1024).toFixed(1)}KB`)
+        chunksRef.current.push(event.data)
+      }
+    }
+
+    const handleStop = () => {
+      console.log('[sanma] Recorder stopped, processing chunks...')
+      const parts = chunksRef.current.slice()
+      const mimeType = recorder.mimeType || mimeTypeRef.current || 'audio/webm'
+
+      recorder.removeEventListener('dataavailable', handleData)
+      recorder.removeEventListener('stop', handleStop)
+
+      const blob = new Blob(parts, { type: mimeType })
+      console.log(`[sanma] Blob created: ${(blob.size / 1024).toFixed(1)}KB, continuousMode: ${continuousModeRef.current}`)
+
+      // Minimum 50KB for 20-second chunks
+      if (blob.size >= 50000) {
+        console.log(`[sanma] Continuous cycle complete, size: ${(blob.size / 1024).toFixed(1)}KB`)
+        setChunkCount((prev) => prev + 1)
+        void transcribeChunk(blob)
+      } else {
+        console.log(`[sanma] Skipping small recording: ${(blob.size / 1024).toFixed(1)}KB`)
+      }
+
+      // Start next cycle if still in continuous mode
+      if (continuousModeRef.current && streamRef.current) {
+        console.log('[sanma] Scheduling next cycle in 500ms...')
+        continuousCycleTimerRef.current = window.setTimeout(() => {
+          void startContinuousRecordingCycle()
+        }, 500) // Small delay between cycles
+      } else {
+        console.log('[sanma] Not starting next cycle. continuousMode:', continuousModeRef.current, 'stream:', !!streamRef.current)
+      }
+    }
+
+    recorder.addEventListener('dataavailable', handleData)
+    recorder.addEventListener('stop', handleStop)
+
+    recorder.start()
+    console.log('[sanma] Recorder started, will stop in 20 seconds')
+
+    // Stop this recording after 20 seconds
+    continuousCycleTimerRef.current = window.setTimeout(() => {
+      console.log('[sanma] 20 seconds elapsed, stopping recorder...')
+      if (recorderRef.current && recorderRef.current.state === 'recording') {
+        recorderRef.current.stop()
+      } else {
+        console.log('[sanma] Recorder not in recording state:', recorderRef.current?.state)
+      }
+    }, 20000)
+  }, [preferredMimeTypes, transcribeChunk])
+
+  const startRecording = useCallback(async (isContinuous = false) => {
     if (!supportsMediaRecorder || status === 'recording' || status === 'initializing') {
       return
     }
@@ -933,73 +1042,89 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
     setTranscription(null)
     setTranscriptionError(null)
     setTranscriptionStatus('idle')
+    setChunkCount(0)
 
     try {
       setStatus('initializing')
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       streamRef.current = stream
 
-      const supportedType = preferredMimeTypes.find((type) => MediaRecorder.isTypeSupported(type))
-      const recorder = supportedType
-        ? new MediaRecorder(stream, { mimeType: supportedType })
-        : new MediaRecorder(stream)
-      recorderRef.current = recorder
-      mimeTypeRef.current = recorder.mimeType || supportedType || 'audio/webm'
-      chunksRef.current = []
-      startTimestampRef.current = Date.now()
+      if (isContinuous) {
+        // Continuous mode: start the cycle
+        setContinuousMode(true)
+        continuousModeRef.current = true
+        setStatus('recording')
+        setElapsedMs(0)
+        timerRef.current = window.setInterval(() => {
+          setElapsedMs((prev) => prev + 1000)
+        }, 1000)
 
-      const handleData = (event: BlobEvent) => {
-        if (event.data && event.data.size > 0) {
-          chunksRef.current.push(event.data)
-        }
-      }
+        // Start the first cycle
+        void startContinuousRecordingCycle()
+      } else {
+        // Manual mode: traditional one-shot recording
+        const supportedType = preferredMimeTypes.find((type) => MediaRecorder.isTypeSupported(type))
+        const recorder = supportedType
+          ? new MediaRecorder(stream, { mimeType: supportedType })
+          : new MediaRecorder(stream)
+        recorderRef.current = recorder
+        mimeTypeRef.current = recorder.mimeType || supportedType || 'audio/webm'
+        chunksRef.current = []
+        startTimestampRef.current = Date.now()
 
-      const handleStop = () => {
-        if (timerRef.current !== null) {
-          window.clearInterval(timerRef.current)
-          timerRef.current = null
-        }
-
-        const durationMs =
-          startTimestampRef.current !== null ? Date.now() - startTimestampRef.current : elapsedMs
-        const parts = chunksRef.current.slice()
-        const mimeType = recorder.mimeType || mimeTypeRef.current || 'audio/webm'
-
-        recorder.removeEventListener('dataavailable', handleData)
-        recorder.removeEventListener('stop', handleStop)
-
-        cleanup({ resetElapsed: true })
-
-        const blob = new Blob(parts, { type: mimeType })
-        if (blob.size > 0) {
-          if (lastRecordingUrlRef.current) {
-            URL.revokeObjectURL(lastRecordingUrlRef.current)
+        const handleData = (event: BlobEvent) => {
+          if (event.data && event.data.size > 0) {
+            chunksRef.current.push(event.data)
           }
-          const url = URL.createObjectURL(blob)
-          lastRecordingUrlRef.current = url
-          const summary: RecordingSummary = {
-            url,
-            size: blob.size,
-            mimeType: blob.type,
-            createdAt: Date.now(),
-            durationMs,
-          }
-          setLatestRecording(summary)
-          void transcribeBlob(blob)
         }
 
-        setStatus('idle')
+        const handleStop = () => {
+          if (timerRef.current !== null) {
+            window.clearInterval(timerRef.current)
+            timerRef.current = null
+          }
+
+          const durationMs =
+            startTimestampRef.current !== null ? Date.now() - startTimestampRef.current : elapsedMs
+          const parts = chunksRef.current.slice()
+          const mimeType = recorder.mimeType || mimeTypeRef.current || 'audio/webm'
+
+          recorder.removeEventListener('dataavailable', handleData)
+          recorder.removeEventListener('stop', handleStop)
+
+          cleanup({ resetElapsed: true })
+
+          const blob = new Blob(parts, { type: mimeType })
+          if (blob.size > 0) {
+            if (lastRecordingUrlRef.current) {
+              URL.revokeObjectURL(lastRecordingUrlRef.current)
+            }
+            const url = URL.createObjectURL(blob)
+            lastRecordingUrlRef.current = url
+            const summary: RecordingSummary = {
+              url,
+              size: blob.size,
+              mimeType: blob.type,
+              createdAt: Date.now(),
+              durationMs,
+            }
+            setLatestRecording(summary)
+            void transcribeBlob(blob)
+          }
+
+          setStatus('idle')
+        }
+
+        recorder.addEventListener('dataavailable', handleData)
+        recorder.addEventListener('stop', handleStop)
+
+        recorder.start()
+        setStatus('recording')
+        setElapsedMs(0)
+        timerRef.current = window.setInterval(() => {
+          setElapsedMs((prev) => prev + 1000)
+        }, 1000)
       }
-
-      recorder.addEventListener('dataavailable', handleData)
-      recorder.addEventListener('stop', handleStop)
-
-      recorder.start()
-      setStatus('recording')
-      setElapsedMs(0)
-      timerRef.current = window.setInterval(() => {
-        setElapsedMs((prev) => prev + 1000)
-      }, 1000)
     } catch (err) {
       cleanup()
       if (err instanceof DOMException && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) {
@@ -1012,12 +1137,15 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
         )
       }
     }
-  }, [cleanup, elapsedMs, preferredMimeTypes, status, supportsMediaRecorder, transcribeBlob])
+  }, [cleanup, elapsedMs, preferredMimeTypes, status, supportsMediaRecorder, transcribeBlob, startContinuousRecordingCycle])
 
   const stopRecording = useCallback(() => {
     if (status !== 'recording' && status !== 'initializing') {
       return
     }
+
+    setContinuousMode(false)
+    continuousModeRef.current = false
 
     if (recorderRef.current && recorderRef.current.state !== 'inactive') {
       recorderRef.current.stop()
@@ -1066,17 +1194,25 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
             Microphone capture
           </h2>
           <p className="text-xs text-slate-500">
-            MediaRecorder でマイク入力を取得し、録音時間を計測します。
+            {continuousMode ? '継続録音モード: 20秒ごとに自動文字起こし' : 'MediaRecorder でマイク入力を取得し、録音時間を計測します。'}
           </p>
         </div>
         <div className="flex gap-2">
           <button
             type="button"
-            onClick={startRecording}
+            onClick={() => startRecording(true)}
+            disabled={status === 'recording' || status === 'initializing'}
+            className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-emerald-100 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {continuousMode ? 'Continuous…' : 'Start Continuous'}
+          </button>
+          <button
+            type="button"
+            onClick={() => startRecording(false)}
             disabled={status === 'recording' || status === 'initializing'}
             className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-rose-100 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {status === 'recording' ? 'Recording…' : 'Start Recording'}
+            {status === 'recording' && !continuousMode ? 'Recording…' : 'Start Manual'}
           </button>
           <button
             type="button"
@@ -1093,9 +1229,16 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
         <p className="text-xs uppercase tracking-wide text-slate-500">Status</p>
         <p className="mt-1 font-semibold text-slate-100">{renderStatusLabel(status)}</p>
         {status === 'recording' ? (
-          <p className="mt-2 text-2xl font-semibold text-rose-300 tabular-nums">
-            {formatDuration(elapsedMs)}
-          </p>
+          <>
+            <p className="mt-2 text-2xl font-semibold text-rose-300 tabular-nums">
+              {formatDuration(elapsedMs)}
+            </p>
+            {continuousMode ? (
+              <p className="mt-2 text-xs text-emerald-300">
+                処理済みチャンク: {chunkCount}個
+              </p>
+            ) : null}
+          </>
         ) : null}
         {errorMessage ? (
           <p className="mt-2 rounded-md border border-rose-400/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
