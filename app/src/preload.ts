@@ -29,6 +29,10 @@ const api = {
     ipcRenderer.invoke('sanma:generate-suggestion', payload) as Promise<SuggestionRecord>,
   saveTranscription: (payload: { sessionId: string; text: string; locale: string; confidence: number }) =>
     ipcRenderer.invoke('sanma:save-transcription', payload) as Promise<TranscriptionRecord>,
+  getSetting: (payload: { key: string }) =>
+    ipcRenderer.invoke('sanma:get-setting', payload) as Promise<string | null>,
+  setSetting: (payload: { key: string; value: string }) =>
+    ipcRenderer.invoke('sanma:set-setting', payload) as Promise<void>,
   transcribeAudio: (payload: { data: Uint8Array; mimeType: string; locale?: string }) =>
     ipcRenderer.invoke('sanma:transcribe-buffer', {
       data: Buffer.from(payload.data),

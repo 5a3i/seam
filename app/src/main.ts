@@ -40,6 +40,11 @@ type TranscriptionDbRow = {
   confidence: number
   created_at: number
 }
+type SettingDbRow = {
+  key: string
+  value: string
+  updated_at: number
+}
 
 const resolveDbPath = () => {
   if (!cachedDbPath) {
@@ -128,6 +133,14 @@ const ensureSchema = (database: BetterSqliteDatabase) => {
 
   database.exec(`
     CREATE INDEX IF NOT EXISTS idx_transcriptions_session ON transcriptions(session_id, created_at DESC)
+  `)
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
   `)
 }
 
@@ -375,15 +388,36 @@ const getRecentTranscriptions = (sessionId: string, secondsAgo = 180): Transcrip
   return rows.map(mapTranscriptionRow)
 }
 
+const getSetting = (key: string): string | null => {
+  const database = openDatabase()
+  const row = database
+    .prepare<[string], SettingDbRow>('SELECT key, value, updated_at FROM settings WHERE key = ?')
+    .get(key)
+
+  return row?.value ?? null
+}
+
+const setSetting = (key: string, value: string): void => {
+  const database = openDatabase()
+  const now = Date.now()
+
+  database
+    .prepare<[string, string, number]>(
+      'INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)'
+    )
+    .run(key, value, now)
+}
+
 const generateAiSuggestion = async (input: {
   sessionId: string
   currentAgendaTitle?: string
   nextAgendaTitle?: string
 }): Promise<SuggestionRecord> => {
-  const apiKey = process.env.GOOGLE_API_KEY
+  // Try to get API key from database first, fall back to environment variable
+  const apiKey = getSetting('gemini_api_key') ?? process.env.GOOGLE_API_KEY
 
   if (!apiKey) {
-    throw new Error('GOOGLE_API_KEY is not set in environment variables')
+    throw new Error('Gemini API key is not configured. Please set it in Settings.')
   }
 
   // Fetch recent transcriptions from the database (last 120-180 seconds)
@@ -466,6 +500,11 @@ const registerIpcHandlers = () => {
     (_event, payload: { sessionId: string; text: string; locale: string; confidence: number }) =>
       createTranscription(payload)
   )
+
+  ipcMain.handle('sanma:get-setting', (_event, payload: { key: string }) => getSetting(payload.key))
+  ipcMain.handle('sanma:set-setting', (_event, payload: { key: string; value: string }) => {
+    setSetting(payload.key, payload.value)
+  })
 
   ipcMain.handle('sanma:transcribe-audio', async (_event, payload: { path: string; locale?: string }) => {
     if (!payload?.path) {

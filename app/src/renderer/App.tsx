@@ -208,6 +208,8 @@ export function App() {
 
         <AgendaPanel sessionId={sessions[0]?.id} />
 
+        <SettingsPanel />
+
         <SuggestionPanel sessionId={sessions[0]?.id} />
 
         <MicrophonePanel sessionId={sessions[0]?.id} />
@@ -515,6 +517,127 @@ function SortableAgendaItem({ agenda, onDelete, onUpdateStatus }: SortableAgenda
         </button>
       </div>
     </li>
+  )
+}
+
+function SettingsPanel() {
+  const [apiKey, setApiKey] = useState('')
+  const [isLoading, setIsLoading] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
+  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [isExpanded, setIsExpanded] = useState(false)
+
+  useEffect(() => {
+    const loadApiKey = async () => {
+      try {
+        setIsLoading(true)
+        const key = await window.sanma.getSetting({ key: 'gemini_api_key' })
+        if (key) {
+          setApiKey(key)
+        }
+      } catch (err) {
+        console.error('[sanma] Failed to load API key:', err)
+      } finally {
+        setIsLoading(false)
+      }
+    }
+
+    void loadApiKey()
+  }, [])
+
+  const handleSave = useCallback(async () => {
+    if (!apiKey.trim()) {
+      setMessage({ type: 'error', text: 'API key cannot be empty' })
+      return
+    }
+
+    try {
+      setIsSaving(true)
+      setMessage(null)
+      await window.sanma.setSetting({ key: 'gemini_api_key', value: apiKey.trim() })
+      setMessage({ type: 'success', text: 'API key saved successfully' })
+      setTimeout(() => setMessage(null), 3000)
+    } catch (err) {
+      setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Failed to save API key' })
+      console.error('[sanma] Failed to save API key:', err)
+    } finally {
+      setIsSaving(false)
+    }
+  }, [apiKey])
+
+  return (
+    <section className="space-y-4 text-left">
+      <button
+        type="button"
+        onClick={() => setIsExpanded(!isExpanded)}
+        className="flex w-full items-center justify-between rounded-xl border border-slate-800/60 bg-slate-950/40 p-4 text-left transition hover:bg-slate-900/40"
+      >
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">Settings</h2>
+          <p className="text-xs text-slate-500">Configure Gemini API key</p>
+        </div>
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          className={`h-5 w-5 text-slate-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {isExpanded && (
+        <div className="space-y-4 rounded-xl border border-slate-800/60 bg-slate-950/40 p-4">
+          <div>
+            <label htmlFor="api-key" className="block text-xs font-semibold uppercase tracking-wide text-slate-400">
+              Gemini API Key
+            </label>
+            <p className="mt-1 text-xs text-slate-500">
+              Get your API key from{' '}
+              <a
+                href="https://aistudio.google.com/apikey"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-emerald-400 hover:text-emerald-300"
+              >
+                Google AI Studio
+              </a>
+            </p>
+            <input
+              id="api-key"
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              disabled={isLoading || isSaving}
+              placeholder="Enter your Gemini API key"
+              className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-emerald-500/40 focus:outline-none focus:ring-1 focus:ring-emerald-500/40 disabled:cursor-not-allowed disabled:opacity-50"
+            />
+          </div>
+
+          {message && (
+            <div
+              className={`rounded-lg border px-4 py-3 text-sm ${
+                message.type === 'success'
+                  ? 'border-emerald-400/50 bg-emerald-500/10 text-emerald-200'
+                  : 'border-rose-400/50 bg-rose-500/10 text-rose-200'
+              }`}
+            >
+              {message.text}
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={isSaving || isLoading}
+            className="w-full rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-emerald-100 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isSaving ? 'Saving…' : 'Save API Key'}
+          </button>
+        </div>
+      )}
+    </section>
   )
 }
 
