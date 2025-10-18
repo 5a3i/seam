@@ -83,9 +83,19 @@ private func run(config: AppConfig) throws {
 
     let request = SFSpeechURLRecognitionRequest(url: config.audioURL)
     request.shouldReportPartialResults = true
+
+    // Enable on-device recognition for better accuracy and privacy
     if #available(macOS 12.0, *), recognizer.supportsOnDeviceRecognition {
-        request.requiresOnDeviceRecognition = false
-        fputs("[speech] On-device recognition available but using server-based for testing\n", stderr)
+        request.requiresOnDeviceRecognition = true
+        fputs("[speech] Using on-device recognition for better accuracy and privacy\n", stderr)
+    } else {
+        fputs("[speech] On-device recognition not available, using server-based\n", stderr)
+    }
+
+    // Enable automatic punctuation (macOS 13+)
+    if #available(macOS 13.0, *) {
+        request.addsPunctuation = true
+        fputs("[speech] Automatic punctuation enabled\n", stderr)
     }
 
     let semaphore = DispatchSemaphore(value: 0)

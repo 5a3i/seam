@@ -522,27 +522,32 @@ function SortableAgendaItem({ agenda, onDelete, onUpdateStatus }: SortableAgenda
 
 function SettingsPanel() {
   const [apiKey, setApiKey] = useState('')
+  const [speechEngine, setSpeechEngine] = useState<'apple' | 'web-speech'>('apple')
   const [isLoading, setIsLoading] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [isExpanded, setIsExpanded] = useState(false)
 
   useEffect(() => {
-    const loadApiKey = async () => {
+    const loadSettings = async () => {
       try {
         setIsLoading(true)
         const key = await window.sanma.getSetting({ key: 'gemini_api_key' })
         if (key) {
           setApiKey(key)
         }
+        const engine = await window.sanma.getSetting({ key: 'speech_engine' })
+        if (engine === 'web-speech' || engine === 'apple') {
+          setSpeechEngine(engine)
+        }
       } catch (err) {
-        console.error('[sanma] Failed to load API key:', err)
+        console.error('[sanma] Failed to load settings:', err)
       } finally {
         setIsLoading(false)
       }
     }
 
-    void loadApiKey()
+    void loadSettings()
   }, [])
 
   const handleSave = useCallback(async () => {
@@ -555,15 +560,16 @@ function SettingsPanel() {
       setIsSaving(true)
       setMessage(null)
       await window.sanma.setSetting({ key: 'gemini_api_key', value: apiKey.trim() })
-      setMessage({ type: 'success', text: 'API key saved successfully' })
+      await window.sanma.setSetting({ key: 'speech_engine', value: speechEngine })
+      setMessage({ type: 'success', text: 'Settings saved successfully' })
       setTimeout(() => setMessage(null), 3000)
     } catch (err) {
-      setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Failed to save API key' })
-      console.error('[sanma] Failed to save API key:', err)
+      setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Failed to save settings' })
+      console.error('[sanma] Failed to save settings:', err)
     } finally {
       setIsSaving(false)
     }
-  }, [apiKey])
+  }, [apiKey, speechEngine])
 
   return (
     <section className="space-y-4 text-left">
@@ -615,6 +621,47 @@ function SettingsPanel() {
             />
           </div>
 
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400">
+              Speech Recognition Engine
+            </label>
+            <p className="mt-1 text-xs text-slate-500">
+              Choose between Apple Speech (offline, high quality) or Web Speech API (online, browser-based)
+            </p>
+            <div className="mt-2 space-y-2">
+              <label className="flex items-center space-x-3 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 cursor-pointer hover:bg-slate-750 transition">
+                <input
+                  type="radio"
+                  name="speech-engine"
+                  value="apple"
+                  checked={speechEngine === 'apple'}
+                  onChange={(e) => setSpeechEngine(e.target.value as 'apple')}
+                  disabled={isLoading || isSaving}
+                  className="h-4 w-4 text-emerald-500 focus:ring-emerald-500/40"
+                />
+                <div className="flex-1">
+                  <div className="text-sm font-semibold text-slate-100">Apple Speech Framework</div>
+                  <div className="text-xs text-slate-400">macOS native, offline, high quality</div>
+                </div>
+              </label>
+              <label className="flex items-center space-x-3 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 cursor-pointer hover:bg-slate-750 transition">
+                <input
+                  type="radio"
+                  name="speech-engine"
+                  value="web-speech"
+                  checked={speechEngine === 'web-speech'}
+                  onChange={(e) => setSpeechEngine(e.target.value as 'web-speech')}
+                  disabled={isLoading || isSaving}
+                  className="h-4 w-4 text-emerald-500 focus:ring-emerald-500/40"
+                />
+                <div className="flex-1">
+                  <div className="text-sm font-semibold text-slate-100">Web Speech API</div>
+                  <div className="text-xs text-slate-400">Browser-based, requires internet, real-time</div>
+                </div>
+              </label>
+            </div>
+          </div>
+
           {message && (
             <div
               className={`rounded-lg border px-4 py-3 text-sm ${
@@ -633,7 +680,7 @@ function SettingsPanel() {
             disabled={isSaving || isLoading}
             className="w-full rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-emerald-100 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {isSaving ? 'Saving…' : 'Save API Key'}
+            {isSaving ? 'Saving…' : 'Save Settings'}
           </button>
         </div>
       )}
