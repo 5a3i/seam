@@ -577,6 +577,60 @@ JSON以外の文字は含めないでください。`
   })
 }
 
+const generateSummary = async (input: {
+  sessionId: string
+  secondsAgo?: number
+}): Promise<string> => {
+  // Try to get API key from database first, fall back to environment variable
+  const apiKey = getSetting('gemini_api_key') ?? process.env.GOOGLE_API_KEY
+
+  if (!apiKey) {
+    throw new Error('Gemini API key is not configured. Please set it in Settings.')
+  }
+
+  // Fetch all transcriptions from the session start
+  const transcriptions = getRecentTranscriptions(input.sessionId, input.secondsAgo ?? 999999)
+
+  console.log('[Summary] Fetched transcriptions:', {
+    count: transcriptions.length,
+    sessionId: input.sessionId,
+  })
+
+  if (transcriptions.length === 0) {
+    return '会話内容がまだありません。'
+  }
+
+  const allTranscriptions = transcriptions.map((t) => t.text).join('\n')
+
+  console.log('[Summary] Combined transcriptions length:', allTranscriptions.length, 'chars')
+
+  const genAI = new GoogleGenerativeAI(apiKey)
+  const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' })
+
+  const prompt = `あなたは会議の議事録作成アシスタントです。以下の会話内容全体を簡潔にまとめてください。
+
+会話内容:
+${allTranscriptions}
+
+要件:
+- 話し合われた主要なトピックを箇条書きで整理してください
+- 各トピックについて、議論の要点を1〜2文で簡潔にまとめてください
+- 決定事項や合意点があれば明記してください
+- 全体で200〜300字程度にまとめてください
+
+JSON形式ではなく、読みやすい日本語の文章で回答してください。`
+
+  console.log('[Summary] Generating summary...')
+
+  const result = await model.generateContent(prompt)
+  const response = result.response
+  const text = response.text()
+
+  console.log('[Summary] Generated summary:', text.substring(0, 100) + '...')
+
+  return text.trim()
+}
+
 const registerIpcHandlers = () => {
   openDatabase()
 
@@ -602,9 +656,21 @@ const registerIpcHandlers = () => {
   )
 
   ipcMain.handle(
+    'sanma:generate-summary',
+    async (_event, payload: { sessionId: string; secondsAgo?: number }) =>
+      generateSummary(payload)
+  )
+
+  ipcMain.handle(
     'sanma:save-transcription',
     (_event, payload: { sessionId: string; text: string; locale: string; confidence: number }) =>
       createTranscription(payload)
+  )
+
+  ipcMain.handle(
+    'sanma:get-transcriptions',
+    (_event, payload: { sessionId: string; secondsAgo?: number }) =>
+      getRecentTranscriptions(payload.sessionId, payload.secondsAgo ?? 180)
   )
 
   ipcMain.handle('sanma:get-setting', (_event, payload: { key: string }) => getSetting(payload.key))

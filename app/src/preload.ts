@@ -31,8 +31,12 @@ const api = {
     ipcRenderer.invoke('sanma:get-suggestions', payload) as Promise<SuggestionRecord[]>,
   generateSuggestion: (payload: { sessionId: string; currentAgendaTitle?: string; nextAgendaTitle?: string }) =>
     ipcRenderer.invoke('sanma:generate-suggestion', payload) as Promise<SuggestionRecord>,
+  generateSummary: (payload: { sessionId: string; secondsAgo?: number }) =>
+    ipcRenderer.invoke('sanma:generate-summary', payload) as Promise<string>,
   saveTranscription: (payload: { sessionId: string; text: string; locale: string; confidence: number }) =>
     ipcRenderer.invoke('sanma:save-transcription', payload) as Promise<TranscriptionRecord>,
+  getTranscriptions: (payload: { sessionId: string; secondsAgo?: number }) =>
+    ipcRenderer.invoke('sanma:get-transcriptions', payload) as Promise<TranscriptionRecord[]>,
   getSetting: (payload: { key: string }) =>
     ipcRenderer.invoke('sanma:get-setting', payload) as Promise<string | null>,
   setSetting: (payload: { key: string; value: string }) =>

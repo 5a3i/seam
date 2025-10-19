@@ -571,6 +571,25 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
   const [transcriptionError, setTranscriptionError] = useState<string | null>(null)
   const [continuousMode, setContinuousMode] = useState(false)
   const [chunkCount, setChunkCount] = useState(0)
+  const [summary, setSummary] = useState<string>('')
+  const [summaryUpdatedAt, setSummaryUpdatedAt] = useState<number | null>(null)
+  const [isSummaryGenerating, setIsSummaryGenerating] = useState(false)
+  const summaryTimerRef = useRef<number | null>(null)
+
+  const generateAndUpdateSummary = useCallback(async () => {
+    if (!sessionId || isSummaryGenerating) return
+
+    try {
+      setIsSummaryGenerating(true)
+      const newSummary = await window.sanma.generateSummary({ sessionId })
+      setSummary(newSummary)
+      setSummaryUpdatedAt(Date.now())
+    } catch (error) {
+      console.error('[sanma] Failed to generate summary:', error)
+    } finally {
+      setIsSummaryGenerating(false)
+    }
+  }, [sessionId, isSummaryGenerating])
 
   const cleanup = useCallback(
     (options: { resetElapsed?: boolean; keepStream?: boolean } = {}) => {
@@ -582,6 +601,11 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
       if (continuousCycleTimerRef.current !== null) {
         window.clearTimeout(continuousCycleTimerRef.current)
         continuousCycleTimerRef.current = null
+      }
+
+      if (summaryTimerRef.current !== null) {
+        window.clearInterval(summaryTimerRef.current)
+        summaryTimerRef.current = null
       }
 
       if (recorderRef.current) {
@@ -720,8 +744,8 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
       const blob = new Blob(parts, { type: mimeType })
       console.log(`[sanma] Blob created: ${(blob.size / 1024).toFixed(1)}KB, continuousMode: ${continuousModeRef.current}`)
 
-      // Minimum 50KB for 20-second chunks
-      if (blob.size >= 50000) {
+      // Minimum 25KB for 10-second chunks
+      if (blob.size >= 25000) {
         console.log(`[sanma] Continuous cycle complete, size: ${(blob.size / 1024).toFixed(1)}KB`)
         setChunkCount((prev) => prev + 1)
         void transcribeChunk(blob)
@@ -744,17 +768,17 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
     recorder.addEventListener('stop', handleStop)
 
     recorder.start()
-    console.log('[sanma] Recorder started, will stop in 20 seconds')
+    console.log('[sanma] Recorder started, will stop in 10 seconds')
 
-    // Stop this recording after 20 seconds
+    // Stop this recording after 10 seconds
     continuousCycleTimerRef.current = window.setTimeout(() => {
-      console.log('[sanma] 20 seconds elapsed, stopping recorder...')
+      console.log('[sanma] 10 seconds elapsed, stopping recorder...')
       if (recorderRef.current && recorderRef.current.state === 'recording') {
         recorderRef.current.stop()
       } else {
         console.log('[sanma] Recorder not in recording state:', recorderRef.current?.state)
       }
-    }, 20000)
+    }, 10000)
   }, [preferredMimeTypes, transcribeChunk])
 
   const startRecording = useCallback(async (isContinuous = false) => {
@@ -782,6 +806,14 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
         timerRef.current = window.setInterval(() => {
           setElapsedMs((prev) => prev + 1000)
         }, 1000)
+
+        // Start summary generation timer (every 30 seconds)
+        summaryTimerRef.current = window.setInterval(() => {
+          void generateAndUpdateSummary()
+        }, 30000)
+
+        // Generate initial summary immediately
+        void generateAndUpdateSummary()
 
         // Start the first cycle
         void startContinuousRecordingCycle()
@@ -851,7 +883,7 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
         )
       }
     }
-  }, [cleanup, elapsedMs, preferredMimeTypes, status, supportsMediaRecorder, transcribeBlob, startContinuousRecordingCycle])
+  }, [cleanup, elapsedMs, preferredMimeTypes, status, supportsMediaRecorder, transcribeBlob, startContinuousRecordingCycle, generateAndUpdateSummary])
 
   const stopRecording = useCallback(() => {
     if (status !== 'recording' && status !== 'initializing') {
@@ -885,12 +917,12 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
   return (
     <section className="flex h-full flex-col p-6">
       {/* Header with recording status */}
-      <div className="mb-6">
-        <h2 className="text-lg font-medium text-slate-100">文字起こし</h2>
+      <div className="mb-6 flex items-center justify-between">
+        <h2 className="text-lg font-medium text-slate-100">現在の議論</h2>
         {status === 'recording' && continuousMode && (
-          <div className="mt-2 flex items-center gap-2">
+          <div className="flex items-center gap-2 rounded-full bg-red-500/20 border border-red-500/50 px-3 py-1.5">
             <div className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
-            <span className="text-sm text-slate-400">録音中</span>
+            <span className="text-xs text-red-200 font-medium">録音中</span>
           </div>
         )}
       </div>
@@ -903,28 +935,67 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
       )}
 
       {/* Transcription display */}
-      <div className="flex-1 space-y-4 overflow-y-auto">
-        {transcription && (
-          <div className="space-y-1">
-            <div className="text-xs text-slate-500">
-              {new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+      <div className="flex-1 space-y-6 overflow-y-auto">
+        {/* Current Speech Section */}
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-slate-300">
+            <svg className="h-4 w-4 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+            </svg>
+            現在の発言
+          </div>
+
+          {transcription && (
+            <div className="rounded-lg bg-blue-500/10 border border-blue-500/30 px-4 py-3 space-y-2">
+              <div className="text-xs text-blue-300">
+                {new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+              </div>
+              <div className="text-sm leading-relaxed text-slate-200">{transcription.text}</div>
             </div>
-            <div className="text-sm leading-relaxed text-slate-200">{transcription.text}</div>
-          </div>
-        )}
+          )}
 
-        {transcriptionStatus === 'pending' && (
-          <div className="flex items-center gap-2 text-sm text-slate-400">
-            <div className="h-3 w-3 animate-spin rounded-full border-2 border-slate-400 border-t-transparent" />
-            <span>文字起こし中...</span>
-          </div>
-        )}
+          {transcriptionStatus === 'pending' && (
+            <div className="flex items-center gap-2 rounded-lg bg-slate-800/40 px-4 py-3 text-sm text-slate-400">
+              <div className="h-3 w-3 animate-spin rounded-full border-2 border-slate-400 border-t-transparent" />
+              <span>文字起こし中...</span>
+            </div>
+          )}
 
-        {transcriptionError && (
-          <div className="rounded-lg border border-rose-400/50 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
-            {transcriptionError}
+          {transcriptionError && (
+            <div className="rounded-lg border border-rose-400/50 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+              {transcriptionError}
+            </div>
+          )}
+        </div>
+
+        {/* Summary Section */}
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-slate-300">
+            <svg className="h-4 w-4 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            これまでのサマリ
+            {isSummaryGenerating && (
+              <div className="h-3 w-3 animate-spin rounded-full border-2 border-green-400 border-t-transparent ml-2" />
+            )}
           </div>
-        )}
+
+          <div className="rounded-lg bg-slate-800/40 px-4 py-3">
+            {summary ? (
+              <p className="text-sm leading-relaxed text-slate-300 whitespace-pre-wrap">{summary}</p>
+            ) : (
+              <p className="text-sm leading-relaxed text-slate-400 italic">
+                {isSummaryGenerating ? 'サマリを生成中...' : '録音を開始すると、30秒ごとに会話内容がサマライズされます。'}
+              </p>
+            )}
+          </div>
+
+          {summaryUpdatedAt && (
+            <div className="text-xs text-slate-500">
+              最終更新: {new Date(summaryUpdatedAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Bottom controls */}
