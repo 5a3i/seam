@@ -18,53 +18,16 @@ import {
 import { CSS } from '@dnd-kit/utilities'
 import type { SessionRecord, AgendaRecord, TranscriptionResult, SuggestionRecord } from '../shared/types'
 
-const fallbackVersions = {
-  node: '-',
-  chrome: '-',
-  electron: '-',
-} as const
-
-type LoadState = 'idle' | 'loading' | 'ready' | 'error'
-
 export function App() {
   const [sessions, setSessions] = useState<SessionRecord[]>([])
-  const [dbPath, setDbPath] = useState<string | null>(null)
-  const [status, setStatus] = useState<LoadState>('idle')
-  const [error, setError] = useState<string | null>(null)
   const [isCreating, setIsCreating] = useState(false)
-
-  const system = useMemo(() => {
-    try {
-      return {
-        ping: window.sanma.ping(),
-        platform: window.sanma.getPlatform(),
-        versions: window.sanma.getVersions(),
-      }
-    } catch {
-      return {
-        ping: 'unavailable',
-        platform: 'unknown',
-        versions: fallbackVersions,
-      }
-    }
-  }, [])
-
-  const { ping, platform, versions } = system
+  const [showSessionSetup, setShowSessionSetup] = useState(false)
 
   const loadSessions = useCallback(async () => {
     try {
-      setStatus('loading')
-      setError(null)
-      const [records, resolvedPath] = await Promise.all([
-        window.sanma.getSessions(),
-        window.sanma.getDatabasePath(),
-      ])
+      const records = await window.sanma.getSessions()
       setSessions(records)
-      setDbPath(resolvedPath)
-      setStatus('ready')
     } catch (err) {
-      setStatus('error')
-      setError(err instanceof Error ? err.message : String(err))
       console.error('[sanma] failed to load sessions', err)
     }
   }, [])
@@ -73,182 +36,105 @@ export function App() {
     void loadSessions()
   }, [loadSessions])
 
-  const handleCreateSession = useCallback(async () => {
+  const handleOpenSessionSetup = useCallback(() => {
+    setShowSessionSetup(true)
+  }, [])
+
+  const handleCreateSession = useCallback(async (title: string, duration: number, agendaItems: string[]) => {
     try {
       setIsCreating(true)
-      const timestamp = new Date()
-      const title = `追加セッション ${timestamp.toLocaleTimeString()}`
-      const session = await window.sanma.createSession({ title })
-      setSessions((prev) => [session, ...prev])
-      setStatus('ready')
+      const session = await window.sanma.createSession({ title, duration, agendaItems })
+      // Start the session immediately
+      const startedSession = await window.sanma.startSession({ sessionId: session.id })
+      setSessions((prev) => [startedSession, ...prev.filter(s => s.id !== session.id)])
+      setShowSessionSetup(false)
     } catch (err) {
-      setStatus('error')
-      setError(err instanceof Error ? err.message : String(err))
       console.error('[sanma] failed to create session', err)
     } finally {
       setIsCreating(false)
     }
   }, [])
 
-  const handleRefresh = useCallback(() => {
-    void loadSessions()
-  }, [loadSessions])
+  const activeSession = sessions.find((s) => s.startedAt && !s.endedAt) || sessions[0]
+
+  // Show session setup if no active session or explicitly requested
+  if (!activeSession || showSessionSetup) {
+    return (
+      <SessionSetupModal
+        onClose={() => setShowSessionSetup(false)}
+        onCreate={handleCreateSession}
+        isCreating={isCreating}
+      />
+    )
+  }
 
   return (
-    <main className="app">
-      <div className="w-full max-w-2xl space-y-8 rounded-2xl border border-slate-800 bg-slate-900/70 p-8 shadow-xl shadow-black/40 backdrop-blur">
-        <header className="space-y-3">
-          <span className="inline-flex items-center gap-2 rounded-full border border-emerald-400/40 bg-emerald-400/10 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-emerald-200">
-            Ready
-            <span className="h-2 w-2 rounded-full bg-emerald-400" />
+    <main className="flex h-screen flex-col bg-slate-950">
+      {/* Top Bar */}
+      <header className="flex items-center justify-between border-b border-slate-800 bg-slate-900 px-6 py-3">
+        <div className="flex items-center gap-4">
+          <h1 className="text-lg font-semibold text-slate-100">{activeSession.title}</h1>
+          <span className="text-sm text-slate-400">
+            {new Date(activeSession.startedAt!).toLocaleString('ja-JP', {
+              year: 'numeric',
+              month: '2-digit',
+              day: '2-digit',
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            })}
           </span>
-          <h1 className="text-4xl font-semibold tracking-tight text-slate-50">Sanma Native DB</h1>
-          <p className="text-sm leading-relaxed text-slate-300">
-            better-sqlite3 をメインプロセスで開き、IPC 経由で React からレコードを取得・追加できるようになりました。
-          </p>
-        </header>
+        </div>
+        <button
+          type="button"
+          onClick={async () => {
+            if (activeSession.id) {
+              await window.sanma.endSession({ sessionId: activeSession.id })
+              setShowSessionSetup(true)
+              await loadSessions()
+            }
+          }}
+          className="rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium text-slate-200 transition hover:bg-slate-700"
+        >
+          セッション終了
+        </button>
+      </header>
 
-        <section className="grid gap-4 text-left sm:grid-cols-3">
-          <StatCard label="Platform" value={platform} />
-          <StatCard label="Electron" value={versions.electron ?? fallbackVersions.electron} />
-          <StatCard label="Ping" value={ping} />
-        </section>
+      {/* Main 3-Column Layout */}
+      <div className="flex flex-1 overflow-hidden">
+        {/* Left Sidebar - Agenda */}
+        <aside className="w-80 border-r border-slate-800 bg-slate-900/50 overflow-y-auto">
+          <AgendaPanel
+            session={activeSession}
+            onTriggerAISummary={() => {
+              window.dispatchEvent(new CustomEvent('trigger-ai-summary'))
+            }}
+          />
+        </aside>
 
-        <section>
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-400">
-            Runtime versions
-          </h2>
-          <ul className="grid gap-2 rounded-xl border border-slate-800/80 bg-slate-950/50 p-4 text-sm text-slate-300 sm:grid-cols-3">
-            <li className="flex flex-col gap-1 rounded-lg bg-slate-900/60 p-3">
-              <span className="text-xs uppercase tracking-wide text-slate-500">Node.js</span>
-              <span className="font-medium text-slate-100">{versions.node}</span>
-            </li>
-            <li className="flex flex-col gap-1 rounded-lg bg-slate-900/60 p-3">
-              <span className="text-xs uppercase tracking-wide text-slate-500">Chromium</span>
-              <span className="font-medium text-slate-100">{versions.chrome}</span>
-            </li>
-            <li className="flex flex-col gap-1 rounded-lg bg-slate-900/60 p-3">
-              <span className="text-xs uppercase tracking-wide text-slate-500">Electron</span>
-              <span className="font-medium text-slate-100">
-                {versions.electron ?? fallbackVersions.electron}
-              </span>
-            </li>
-          </ul>
-        </section>
+        {/* Center - Live Transcription */}
+        <main className="flex-1 overflow-y-auto bg-slate-950/30">
+          <MicrophonePanel sessionId={activeSession.id} />
+        </main>
 
-        <section className="space-y-4 text-left">
-          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-            <div>
-              <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
-                Session table
-              </h2>
-              <p className="text-xs text-slate-500">
-                {status === 'ready' && sessions.length > 0
-                  ? `${sessions.length} record${sessions.length === 1 ? '' : 's'} saved`
-                  : status === 'loading'
-                    ? 'Loading better-sqlite3...'
-                    : status === 'error'
-                      ? 'Failed to load database'
-                      : 'Initializing...'}
-              </p>
-            </div>
-
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={handleRefresh}
-                disabled={status === 'loading'}
-                className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-200 transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                Refresh
-              </button>
-              <button
-                type="button"
-                onClick={handleCreateSession}
-                disabled={isCreating}
-                className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-emerald-100 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {isCreating ? 'Adding…' : 'Add Session'}
-              </button>
-            </div>
-          </div>
-
-          {error ? (
-            <div className="rounded-lg border border-rose-400/50 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
-              {error}
-            </div>
-          ) : sessions.length > 0 ? (
-            <ul className="grid gap-3">
-              {sessions.map((session) => (
-                <li
-                  key={session.id}
-                  className="rounded-xl border border-slate-800/60 bg-slate-950/40 p-4"
-                >
-                  <p className="text-sm font-semibold text-slate-50">{session.title}</p>
-                  <p className="mt-1 text-xs text-slate-500">
-                    {new Date(session.createdAt).toLocaleString()}
-                  </p>
-                </li>
-              ))}
-            </ul>
-          ) : status === 'loading' ? (
-            <div className="rounded-xl border border-slate-800/60 bg-slate-950/40 p-4 text-sm text-slate-300">
-              Opening database...
-            </div>
-          ) : null}
-
-          {dbPath ? (
-            <p className="text-[11px] text-slate-500">
-              DB located at:
-              <br />
-              <span className="font-mono text-slate-400 break-all">{dbPath}</span>
-            </p>
-          ) : null}
-        </section>
-
-        <AgendaPanel sessionId={sessions[0]?.id} />
-
-        <SettingsPanel />
-
-        <SuggestionPanel sessionId={sessions[0]?.id} />
-
-        <MicrophonePanel sessionId={sessions[0]?.id} />
+        {/* Right Sidebar - AI Suggestions */}
+        <aside className="w-96 border-l border-slate-800 bg-slate-900/50 overflow-y-auto">
+          <SuggestionPanel sessionId={activeSession.id} />
+        </aside>
       </div>
     </main>
   )
 }
 
-type StatCardProps = {
-  label: string
-  value: string
-}
-
-function StatCard({ label, value }: StatCardProps) {
-  return (
-    <div className="rounded-xl border border-slate-800/70 bg-slate-950/40 p-4">
-      <p className="text-xs uppercase tracking-wide text-slate-500">{label}</p>
-      <p className="mt-2 text-lg font-semibold text-slate-100">{value}</p>
-    </div>
-  )
-}
-
 type AgendaPanelProps = {
-  sessionId?: string
+  session?: SessionRecord
+  onTriggerAISummary?: () => void
 }
 
-function AgendaPanel({ sessionId }: AgendaPanelProps) {
+function AgendaPanel({ session, onTriggerAISummary }: AgendaPanelProps) {
+  const sessionId = session?.id
   const [agendas, setAgendas] = useState<AgendaRecord[]>([])
   const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [newAgendaTitle, setNewAgendaTitle] = useState('')
-  const [isCreating, setIsCreating] = useState(false)
-
-  const sensors = useSensors(
-    useSensor(PointerSensor),
-    useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
-    }),
-  )
 
   const loadAgendas = useCallback(async () => {
     if (!sessionId) {
@@ -258,11 +144,9 @@ function AgendaPanel({ sessionId }: AgendaPanelProps) {
 
     try {
       setIsLoading(true)
-      setError(null)
       const records = await window.sanma.getAgendas({ sessionId })
       setAgendas(records)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
       console.error('[sanma] failed to load agendas', err)
     } finally {
       setIsLoading(false)
@@ -273,420 +157,56 @@ function AgendaPanel({ sessionId }: AgendaPanelProps) {
     void loadAgendas()
   }, [loadAgendas])
 
-  const handleCreateAgenda = useCallback(async () => {
-    if (!sessionId || !newAgendaTitle.trim()) return
-
-    try {
-      setIsCreating(true)
-      const agenda = await window.sanma.createAgenda({ sessionId, title: newAgendaTitle.trim() })
-      setAgendas((prev) => [...prev, agenda])
-      setNewAgendaTitle('')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-      console.error('[sanma] failed to create agenda', err)
-    } finally {
-      setIsCreating(false)
-    }
-  }, [sessionId, newAgendaTitle])
-
-  const handleDeleteAgenda = useCallback(async (id: string) => {
-    try {
-      await window.sanma.deleteAgenda({ id })
-      setAgendas((prev) => prev.filter((a) => a.id !== id))
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-      console.error('[sanma] failed to delete agenda', err)
-    }
-  }, [])
-
-  const handleUpdateAgendaStatus = useCallback(async (id: string, status: string) => {
-    try {
-      const updated = await window.sanma.updateAgenda({ id, status })
-      setAgendas((prev) => prev.map((a) => (a.id === id ? updated : a)))
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-      console.error('[sanma] failed to update agenda status', err)
-    }
-  }, [])
-
-  const handleDragEnd = useCallback(
-    async (event: DragEndEvent) => {
-      const { active, over } = event
-
-      if (!over || active.id === over.id || !sessionId) return
-
-      const oldIndex = agendas.findIndex((a) => a.id === active.id)
-      const newIndex = agendas.findIndex((a) => a.id === over.id)
-
-      if (oldIndex === -1 || newIndex === -1) return
-
-      const reordered = arrayMove(agendas, oldIndex, newIndex)
-      setAgendas(reordered)
-
-      try {
-        const agendaIds = reordered.map((a) => a.id)
-        await window.sanma.reorderAgendas({ sessionId, agendaIds })
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err))
-        console.error('[sanma] failed to reorder agendas', err)
-        void loadAgendas()
-      }
-    },
-    [agendas, sessionId, loadAgendas],
-  )
-
-  const currentAgenda = agendas.find((a) => a.status === 'current')
-  const nextAgenda = agendas.find((a) => a.status === 'pending')
-
   if (!sessionId) {
     return (
-      <section className="space-y-3 text-left">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">Agenda list</h2>
-        <div className="rounded-xl border border-slate-800/60 bg-slate-950/40 p-4 text-sm text-slate-400">
+      <div className="p-6">
+        <h2 className="text-sm font-medium text-slate-400">議題リスト</h2>
+        <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/40 p-4 text-sm text-slate-400">
           セッションを選択してください
         </div>
-      </section>
+      </div>
     )
   }
 
+  const currentAgenda = agendas.find((a) => a.status === 'current')
+
   return (
-    <section className="space-y-4 text-left">
-      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
-        <div>
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">Agenda list</h2>
-          {(currentAgenda || nextAgenda) && (
-            <div className="mt-2 space-y-1 text-xs">
-              {currentAgenda && (
-                <p className="text-emerald-300">
-                  <span className="text-slate-500">Current:</span> {currentAgenda.title}
-                </p>
-              )}
-              {nextAgenda && (
-                <p className="text-sky-300">
-                  <span className="text-slate-500">Next:</span> {nextAgenda.title}
-                </p>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="flex gap-2">
-        <input
-          type="text"
-          value={newAgendaTitle}
-          onChange={(e) => setNewAgendaTitle(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') void handleCreateAgenda()
-          }}
-          placeholder="新しい議題を追加"
-          className="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-emerald-500/40 focus:outline-none focus:ring-1 focus:ring-emerald-500/40"
-        />
-        <button
-          type="button"
-          onClick={handleCreateAgenda}
-          disabled={isCreating || !newAgendaTitle.trim()}
-          className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-emerald-100 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {isCreating ? 'Adding…' : 'Add'}
-        </button>
-      </div>
-
-      {error ? (
-        <div className="rounded-lg border border-rose-400/50 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
-          {error}
-        </div>
-      ) : null}
+    <div className="p-6 space-y-4">
+      <h2 className="text-sm font-medium text-slate-400">議題リスト</h2>
 
       {isLoading ? (
-        <div className="rounded-xl border border-slate-800/60 bg-slate-950/40 p-4 text-sm text-slate-300">
-          Loading agendas...
-        </div>
+        <div className="text-sm text-slate-500">読み込み中...</div>
       ) : agendas.length > 0 ? (
-        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-          <SortableContext items={agendas.map((a) => a.id)} strategy={verticalListSortingStrategy}>
-            <ul className="space-y-2">
-              {agendas.map((agenda) => (
-                <SortableAgendaItem
-                  key={agenda.id}
-                  agenda={agenda}
-                  onDelete={handleDeleteAgenda}
-                  onUpdateStatus={handleUpdateAgendaStatus}
-                />
-              ))}
-            </ul>
-          </SortableContext>
-        </DndContext>
+        <ul className="space-y-2">
+          {agendas.map((agenda, index) => {
+            const isCurrent = currentAgenda?.id === agenda.id
+            return (
+              <li
+                key={agenda.id}
+                className={`rounded-lg px-4 py-3 text-sm transition ${
+                  isCurrent
+                    ? 'bg-blue-600 text-white font-medium'
+                    : 'bg-slate-800/40 text-slate-300'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="font-mono">#{index + 1}</span>
+                  {isCurrent && <span className="text-xs">(current)</span>}
+                  <span className="flex-1">{agenda.title}</span>
+                </div>
+              </li>
+            )
+          })}
+        </ul>
       ) : (
-        <div className="rounded-xl border border-slate-800/60 bg-slate-950/40 p-4 text-sm text-slate-400">
-          議題がまだありません
+        <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-4 text-sm text-slate-400">
+          議題がありません
         </div>
       )}
-    </section>
+    </div>
   )
 }
 
-type SortableAgendaItemProps = {
-  agenda: AgendaRecord
-  onDelete: (id: string) => void
-  onUpdateStatus: (id: string, status: string) => void
-}
-
-function SortableAgendaItem({ agenda, onDelete, onUpdateStatus }: SortableAgendaItemProps) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id: agenda.id,
-  })
-
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.5 : 1,
-  }
-
-  const statusColors = {
-    pending: 'border-slate-800/60 bg-slate-950/40',
-    current: 'border-emerald-500/40 bg-emerald-500/10',
-    completed: 'border-slate-700/40 bg-slate-800/40 opacity-60',
-  }
-
-  return (
-    <li
-      ref={setNodeRef}
-      style={style}
-      className={`rounded-xl border p-4 ${statusColors[agenda.status]}`}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex flex-1 items-start gap-3">
-          <button
-            type="button"
-            {...attributes}
-            {...listeners}
-            className="mt-1 cursor-grab text-slate-500 hover:text-slate-300 active:cursor-grabbing"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              className="h-4 w-4"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M4 6h16M4 12h16M4 18h16"
-              />
-            </svg>
-          </button>
-          <div className="flex-1">
-            <p className="text-sm font-semibold text-slate-50">{agenda.title}</p>
-            <div className="mt-2 flex gap-2">
-              <button
-                type="button"
-                onClick={() => onUpdateStatus(agenda.id, 'pending')}
-                disabled={agenda.status === 'pending'}
-                className="text-xs text-slate-400 hover:text-slate-200 disabled:opacity-50"
-              >
-                Pending
-              </button>
-              <button
-                type="button"
-                onClick={() => onUpdateStatus(agenda.id, 'current')}
-                disabled={agenda.status === 'current'}
-                className="text-xs text-emerald-400 hover:text-emerald-200 disabled:opacity-50"
-              >
-                Current
-              </button>
-              <button
-                type="button"
-                onClick={() => onUpdateStatus(agenda.id, 'completed')}
-                disabled={agenda.status === 'completed'}
-                className="text-xs text-slate-400 hover:text-slate-200 disabled:opacity-50"
-              >
-                Completed
-              </button>
-            </div>
-          </div>
-        </div>
-        <button
-          type="button"
-          onClick={() => onDelete(agenda.id)}
-          className="text-xs font-semibold text-rose-400 hover:text-rose-200"
-        >
-          Delete
-        </button>
-      </div>
-    </li>
-  )
-}
-
-function SettingsPanel() {
-  const [apiKey, setApiKey] = useState('')
-  const [speechEngine, setSpeechEngine] = useState<'apple' | 'web-speech'>('apple')
-  const [isLoading, setIsLoading] = useState(false)
-  const [isSaving, setIsSaving] = useState(false)
-  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
-  const [isExpanded, setIsExpanded] = useState(false)
-
-  useEffect(() => {
-    const loadSettings = async () => {
-      try {
-        setIsLoading(true)
-        const key = await window.sanma.getSetting({ key: 'gemini_api_key' })
-        if (key) {
-          setApiKey(key)
-        }
-        const engine = await window.sanma.getSetting({ key: 'speech_engine' })
-        if (engine === 'web-speech' || engine === 'apple') {
-          setSpeechEngine(engine)
-        }
-      } catch (err) {
-        console.error('[sanma] Failed to load settings:', err)
-      } finally {
-        setIsLoading(false)
-      }
-    }
-
-    void loadSettings()
-  }, [])
-
-  const handleSave = useCallback(async () => {
-    if (!apiKey.trim()) {
-      setMessage({ type: 'error', text: 'API key cannot be empty' })
-      return
-    }
-
-    try {
-      setIsSaving(true)
-      setMessage(null)
-      await window.sanma.setSetting({ key: 'gemini_api_key', value: apiKey.trim() })
-      await window.sanma.setSetting({ key: 'speech_engine', value: speechEngine })
-      setMessage({ type: 'success', text: 'Settings saved successfully' })
-      setTimeout(() => setMessage(null), 3000)
-    } catch (err) {
-      setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Failed to save settings' })
-      console.error('[sanma] Failed to save settings:', err)
-    } finally {
-      setIsSaving(false)
-    }
-  }, [apiKey, speechEngine])
-
-  return (
-    <section className="space-y-4 text-left">
-      <button
-        type="button"
-        onClick={() => setIsExpanded(!isExpanded)}
-        className="flex w-full items-center justify-between rounded-xl border border-slate-800/60 bg-slate-950/40 p-4 text-left transition hover:bg-slate-900/40"
-      >
-        <div>
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">Settings</h2>
-          <p className="text-xs text-slate-500">Configure Gemini API key</p>
-        </div>
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          className={`h-5 w-5 text-slate-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke="currentColor"
-        >
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-        </svg>
-      </button>
-
-      {isExpanded && (
-        <div className="space-y-4 rounded-xl border border-slate-800/60 bg-slate-950/40 p-4">
-          <div>
-            <label htmlFor="api-key" className="block text-xs font-semibold uppercase tracking-wide text-slate-400">
-              Gemini API Key
-            </label>
-            <p className="mt-1 text-xs text-slate-500">
-              Get your API key from{' '}
-              <a
-                href="https://aistudio.google.com/apikey"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-emerald-400 hover:text-emerald-300"
-              >
-                Google AI Studio
-              </a>
-            </p>
-            <input
-              id="api-key"
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              disabled={isLoading || isSaving}
-              placeholder="Enter your Gemini API key"
-              className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-emerald-500/40 focus:outline-none focus:ring-1 focus:ring-emerald-500/40 disabled:cursor-not-allowed disabled:opacity-50"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold uppercase tracking-wide text-slate-400">
-              Speech Recognition Engine
-            </label>
-            <p className="mt-1 text-xs text-slate-500">
-              Choose between Apple Speech (offline, high quality) or Web Speech API (online, browser-based)
-            </p>
-            <div className="mt-2 space-y-2">
-              <label className="flex items-center space-x-3 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 cursor-pointer hover:bg-slate-750 transition">
-                <input
-                  type="radio"
-                  name="speech-engine"
-                  value="apple"
-                  checked={speechEngine === 'apple'}
-                  onChange={(e) => setSpeechEngine(e.target.value as 'apple')}
-                  disabled={isLoading || isSaving}
-                  className="h-4 w-4 text-emerald-500 focus:ring-emerald-500/40"
-                />
-                <div className="flex-1">
-                  <div className="text-sm font-semibold text-slate-100">Apple Speech Framework</div>
-                  <div className="text-xs text-slate-400">macOS native, offline, high quality</div>
-                </div>
-              </label>
-              <label className="flex items-center space-x-3 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 cursor-pointer hover:bg-slate-750 transition">
-                <input
-                  type="radio"
-                  name="speech-engine"
-                  value="web-speech"
-                  checked={speechEngine === 'web-speech'}
-                  onChange={(e) => setSpeechEngine(e.target.value as 'web-speech')}
-                  disabled={isLoading || isSaving}
-                  className="h-4 w-4 text-emerald-500 focus:ring-emerald-500/40"
-                />
-                <div className="flex-1">
-                  <div className="text-sm font-semibold text-slate-100">Web Speech API</div>
-                  <div className="text-xs text-slate-400">Browser-based, requires internet, real-time</div>
-                </div>
-              </label>
-            </div>
-          </div>
-
-          {message && (
-            <div
-              className={`rounded-lg border px-4 py-3 text-sm ${
-                message.type === 'success'
-                  ? 'border-emerald-400/50 bg-emerald-500/10 text-emerald-200'
-                  : 'border-rose-400/50 bg-rose-500/10 text-rose-200'
-              }`}
-            >
-              {message.text}
-            </div>
-          )}
-
-          <button
-            type="button"
-            onClick={handleSave}
-            disabled={isSaving || isLoading}
-            className="w-full rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-emerald-100 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {isSaving ? 'Saving…' : 'Save Settings'}
-          </button>
-        </div>
-      )}
-    </section>
-  )
-}
 
 type SuggestionPanelProps = {
   sessionId?: string
@@ -745,8 +265,16 @@ function SuggestionPanel({ sessionId }: SuggestionPanelProps) {
       }
     }
 
+    const handleTriggerEvent = () => {
+      void handleGenerateSuggestion()
+    }
+
     window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
+    window.addEventListener('trigger-ai-summary', handleTriggerEvent)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('trigger-ai-summary', handleTriggerEvent)
+    }
   }, [handleGenerateSuggestion])
 
   if (!sessionId) {
@@ -756,98 +284,85 @@ function SuggestionPanel({ sessionId }: SuggestionPanelProps) {
   const latestSuggestion = suggestions[0]
 
   return (
-    <section className="space-y-4 text-left">
-      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-        <div>
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">AI Suggestions</h2>
-          <p className="text-xs text-slate-500">Press ⌘J to generate suggestions</p>
-        </div>
-        <button
-          type="button"
-          onClick={handleGenerateSuggestion}
-          disabled={isGenerating}
-          className="rounded-lg border border-violet-500/40 bg-violet-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-violet-100 transition hover:bg-violet-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {isGenerating ? 'Generating…' : 'Generate (⌘J)'}
-        </button>
-      </div>
-
-      {error ? (
+    <section className="p-6 space-y-6">
+      {/* Error message */}
+      {error && (
         <div className="rounded-lg border border-rose-400/50 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
           {error}
         </div>
-      ) : null}
+      )}
 
-      {isGenerating ? (
-        <div className="rounded-xl border border-violet-500/40 bg-violet-500/10 p-4 text-sm text-violet-100">
-          AI is generating suggestions...
+      {/* Generating indicator */}
+      {isGenerating && (
+        <div className="flex items-center gap-3 rounded-lg border border-violet-500/40 bg-violet-500/10 px-4 py-3">
+          <div className="h-4 w-4 animate-spin rounded-full border-2 border-violet-400 border-t-transparent" />
+          <span className="text-sm text-violet-100">AI生成中...</span>
         </div>
-      ) : null}
+      )}
 
+      {/* Suggestion display */}
       {latestSuggestion ? (
-        <div className="space-y-3 rounded-xl border border-violet-500/40 bg-violet-500/10 p-4">
+        <div className="space-y-4">
+          {/* Summary section */}
           <div>
-            <p className="text-xs uppercase tracking-wide text-violet-300">Summary</p>
-            <p className="mt-1 text-sm text-violet-50">{latestSuggestion.summary}</p>
-          </div>
-
-          <div>
-            <p className="text-xs uppercase tracking-wide text-violet-300">Bridging Question</p>
-            <p className="mt-1 text-sm text-violet-50">{latestSuggestion.bridgingQuestion}</p>
-          </div>
-
-          {latestSuggestion.followUpQuestions.length > 0 ? (
-            <div>
-              <p className="text-xs uppercase tracking-wide text-violet-300">Follow-up Questions</p>
-              <ul className="mt-1 space-y-1 text-sm text-violet-50">
-                {latestSuggestion.followUpQuestions.map((question, index) => (
-                  <li key={index}>• {question}</li>
-                ))}
-              </ul>
+            <h3 className="mb-2 text-sm font-medium text-slate-400">要約</h3>
+            <div className="rounded-lg bg-slate-800/40 px-4 py-3">
+              <p className="text-sm leading-relaxed text-slate-200">{latestSuggestion.summary}</p>
             </div>
-          ) : null}
+          </div>
 
-          <p className="text-[11px] text-violet-300">
-            Generated at {new Date(latestSuggestion.createdAt).toLocaleTimeString()}
+          {/* Bridging question section */}
+          <div>
+            <h3 className="mb-2 text-sm font-medium text-slate-400">繋ぎの一言</h3>
+            <div className="rounded-lg bg-yellow-500/10 border border-yellow-500/30 px-4 py-3">
+              <p className="text-sm leading-relaxed text-yellow-200">{latestSuggestion.bridgingQuestion}</p>
+            </div>
+          </div>
+
+          {/* Follow-up questions section */}
+          {latestSuggestion.followUpQuestions.length > 0 && (
+            <div>
+              <h3 className="mb-2 text-sm font-medium text-slate-400">追加質問</h3>
+              <div className="space-y-2">
+                {latestSuggestion.followUpQuestions.map((question, index) => (
+                  <div key={index} className="flex items-start gap-3 rounded-lg bg-green-500/10 border border-green-500/30 px-4 py-3">
+                    <span className="shrink-0 rounded bg-green-600 px-2 py-0.5 text-xs font-semibold text-white">
+                      Q{index + 1}
+                    </span>
+                    <p className="text-sm leading-relaxed text-green-200">{question}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Generation timestamp */}
+          <p className="text-xs text-slate-500">
+            生成時刻: {new Date(latestSuggestion.createdAt).toLocaleTimeString('ja-JP', {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            })}
           </p>
         </div>
-      ) : null}
-
-      {suggestions.length > 1 ? (
-        <details className="rounded-xl border border-slate-800/60 bg-slate-950/40 p-4">
-          <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-slate-400">
-            History ({suggestions.length - 1} previous)
-          </summary>
-          <ul className="mt-3 space-y-3">
-            {suggestions.slice(1).map((suggestion) => (
-              <li key={suggestion.id} className="rounded-lg border border-slate-800/40 bg-slate-900/40 p-3">
-                <p className="text-xs text-slate-400">{suggestion.summary}</p>
-                <p className="mt-1 text-[10px] text-slate-500">
-                  {new Date(suggestion.createdAt).toLocaleString()}
-                </p>
-              </li>
-            ))}
-          </ul>
-        </details>
-      ) : isLoading ? (
-        <div className="rounded-xl border border-slate-800/60 bg-slate-950/40 p-4 text-sm text-slate-300">
-          Loading suggestions...
+      ) : !isGenerating && (
+        <div className="text-center py-8">
+          <p className="text-sm text-slate-400 mb-4">AI提案はまだありません</p>
+          <button
+            type="button"
+            onClick={handleGenerateSuggestion}
+            className="rounded-lg bg-purple-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-purple-700"
+          >
+            提案を生成
+          </button>
         </div>
-      ) : null}
+      )}
     </section>
   )
 }
 
 type RecorderStatus = 'idle' | 'initializing' | 'recording' | 'denied' | 'unsupported' | 'error'
 type TranscriptionStatus = 'idle' | 'pending' | 'error'
-
-type RecordingSummary = {
-  url: string
-  size: number
-  mimeType: string
-  createdAt: number
-  durationMs: number
-}
 
 type MicrophonePanelProps = {
   sessionId?: string
@@ -888,7 +403,6 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
   )
   const [elapsedMs, setElapsedMs] = useState(0)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
-  const [latestRecording, setLatestRecording] = useState<RecordingSummary | null>(null)
   const [transcriptionStatus, setTranscriptionStatus] = useState<TranscriptionStatus>('idle')
   const [transcription, setTranscription] = useState<TranscriptionResult | null>(null)
   const [transcriptionError, setTranscriptionError] = useState<string | null>(null)
@@ -1130,9 +644,6 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
             window.clearInterval(timerRef.current)
             timerRef.current = null
           }
-
-          const durationMs =
-            startTimestampRef.current !== null ? Date.now() - startTimestampRef.current : elapsedMs
           const parts = chunksRef.current.slice()
           const mimeType = recorder.mimeType || mimeTypeRef.current || 'audio/webm'
 
@@ -1148,14 +659,7 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
             }
             const url = URL.createObjectURL(blob)
             lastRecordingUrlRef.current = url
-            const summary: RecordingSummary = {
-              url,
-              size: blob.size,
-              mimeType: blob.type,
-              createdAt: Date.now(),
-              durationMs,
-            }
-            setLatestRecording(summary)
+            // Recording summary removed - not used in new UI
             void transcribeBlob(blob)
           }
 
@@ -1202,24 +706,6 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
     }
   }, [cleanup, status])
 
-  const resetLatestRecording = useCallback(() => {
-    if (lastRecordingUrlRef.current) {
-      URL.revokeObjectURL(lastRecordingUrlRef.current)
-      lastRecordingUrlRef.current = null
-    }
-    setLatestRecording(null)
-    setTranscription(null)
-    setTranscriptionError(null)
-    setTranscriptionStatus('idle')
-  }, [])
-
-  const formatDuration = (durationMs: number) => {
-    const totalSeconds = Math.floor(durationMs / 1000)
-    const minutes = Math.floor(totalSeconds / 60)
-    const seconds = totalSeconds % 60
-    return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
-  }
-
   if (!supportsMediaRecorder) {
     return (
       <section className="space-y-3 text-left">
@@ -1234,148 +720,200 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
   }
 
   return (
-    <section className="space-y-4 text-left">
-      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-        <div>
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
-            Microphone capture
-          </h2>
-          <p className="text-xs text-slate-500">
-            {continuousMode ? '継続録音モード: 20秒ごとに自動文字起こし' : 'MediaRecorder でマイク入力を取得し、録音時間を計測します。'}
-          </p>
+    <section className="flex h-full flex-col p-6">
+      {/* Header with recording status */}
+      <div className="mb-6">
+        <h2 className="text-lg font-medium text-slate-100">文字起こし</h2>
+        {status === 'recording' && continuousMode && (
+          <div className="mt-2 flex items-center gap-2">
+            <div className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
+            <span className="text-sm text-slate-400">録音中</span>
+          </div>
+        )}
+      </div>
+
+      {/* Error messages */}
+      {errorMessage && (
+        <div className="mb-4 rounded-lg border border-rose-400/50 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+          {errorMessage}
         </div>
-        <div className="flex gap-2">
+      )}
+
+      {/* Transcription display */}
+      <div className="flex-1 space-y-4 overflow-y-auto">
+        {transcription && (
+          <div className="space-y-1">
+            <div className="text-xs text-slate-500">
+              {new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+            </div>
+            <div className="text-sm leading-relaxed text-slate-200">{transcription.text}</div>
+          </div>
+        )}
+
+        {transcriptionStatus === 'pending' && (
+          <div className="flex items-center gap-2 text-sm text-slate-400">
+            <div className="h-3 w-3 animate-spin rounded-full border-2 border-slate-400 border-t-transparent" />
+            <span>文字起こし中...</span>
+          </div>
+        )}
+
+        {transcriptionError && (
+          <div className="rounded-lg border border-rose-400/50 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+            {transcriptionError}
+          </div>
+        )}
+      </div>
+
+      {/* Bottom controls */}
+      <div className="mt-6 flex gap-3">
+        {status === 'recording' && continuousMode ? (
+          <button
+            type="button"
+            onClick={stopRecording}
+            className="flex-1 rounded-lg bg-red-600 px-6 py-3 text-sm font-medium text-white transition hover:bg-red-700"
+          >
+            録音停止
+          </button>
+        ) : (
           <button
             type="button"
             onClick={() => startRecording(true)}
             disabled={status === 'recording' || status === 'initializing'}
-            className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-emerald-100 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex-1 rounded-lg bg-red-600 px-6 py-3 text-sm font-medium text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {continuousMode ? 'Continuous…' : 'Start Continuous'}
+            {status === 'initializing' ? '初期化中...' : '録音開始'}
           </button>
-          <button
-            type="button"
-            onClick={() => startRecording(false)}
-            disabled={status === 'recording' || status === 'initializing'}
-            className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-rose-100 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {status === 'recording' && !continuousMode ? 'Recording…' : 'Start Manual'}
-          </button>
-          <button
-            type="button"
-            onClick={stopRecording}
-            disabled={status !== 'recording' && status !== 'initializing'}
-            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-200 transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            Stop
-          </button>
-        </div>
+        )}
+        <button
+          type="button"
+          onClick={() => {
+            window.dispatchEvent(new CustomEvent('trigger-ai-summary'))
+          }}
+          disabled={!sessionId}
+          className="flex items-center gap-2 rounded-lg bg-purple-600 px-6 py-3 text-sm font-medium text-white transition hover:bg-purple-700 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          提案する 🎨
+        </button>
       </div>
-
-      <div className="rounded-xl border border-slate-800/60 bg-slate-950/40 p-4 text-sm text-slate-300">
-        <p className="text-xs uppercase tracking-wide text-slate-500">Status</p>
-        <p className="mt-1 font-semibold text-slate-100">{renderStatusLabel(status)}</p>
-        {status === 'recording' ? (
-          <>
-            <p className="mt-2 text-2xl font-semibold text-rose-300 tabular-nums">
-              {formatDuration(elapsedMs)}
-            </p>
-            {continuousMode ? (
-              <p className="mt-2 text-xs text-emerald-300">
-                処理済みチャンク: {chunkCount}個
-              </p>
-            ) : null}
-          </>
-        ) : null}
-        {errorMessage ? (
-          <p className="mt-2 rounded-md border border-rose-400/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
-            {errorMessage}
-          </p>
-        ) : null}
-      </div>
-
-      {latestRecording ? (
-        <div className="space-y-3 rounded-xl border border-slate-800/60 bg-slate-950/40 p-4">
-          <div className="flex items-center justify-between gap-2">
-            <div>
-              <p className="text-xs uppercase tracking-wide text-slate-500">Last recording</p>
-              <p className="text-sm font-semibold text-slate-100">
-                {formatDuration(latestRecording.durationMs)}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={resetLatestRecording}
-              className="text-xs font-semibold uppercase tracking-wide text-slate-400 transition hover:text-slate-200"
-            >
-              Clear
-            </button>
-          </div>
-          <audio controls src={latestRecording.url} className="w-full" />
-          <p className="text-[11px] text-slate-500">
-            {latestRecording.mimeType} · {(latestRecording.size / 1024).toFixed(1)} KB ·{' '}
-            {new Date(latestRecording.createdAt).toLocaleTimeString()}
-          </p>
-        </div>
-      ) : null}
-
-      {transcriptionStatus === 'pending' ? (
-        <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-4 text-sm text-emerald-100">
-          音声を文字起こししています…
-        </div>
-      ) : null}
-
-      {transcription ? (
-        <div className="space-y-2 rounded-xl border border-slate-800/60 bg-slate-950/40 p-4">
-          <p className="text-xs uppercase tracking-wide text-slate-500">Transcription</p>
-          <p className="text-sm leading-relaxed text-slate-100 whitespace-pre-wrap">
-            {transcription.text}
-          </p>
-          <p className="text-[11px] text-slate-500">
-            Locale: {transcription.locale} · Confidence: {(transcription.confidence * 100).toFixed(1)}%
-          </p>
-          {transcription.segments.length > 0 ? (
-            <details className="text-xs text-slate-400">
-              <summary className="cursor-pointer select-none text-slate-300">Segments</summary>
-              <ul className="mt-2 space-y-1">
-                {transcription.segments.slice(0, 5).map((segment, index) => (
-                  <li key={`${segment.timestamp}-${index}`} className="rounded border border-slate-800/60 bg-slate-900/40 p-2">
-                    <span className="font-semibold text-slate-200">{segment.substring}</span>
-                    <span className="ml-2 text-[10px] text-slate-500">
-                      {segment.timestamp.toFixed(2)}s · conf {(segment.confidence * 100).toFixed(1)}%
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </details>
-          ) : null}
-        </div>
-      ) : null}
-
-      {transcriptionError ? (
-        <div className="rounded-xl border border-rose-400/50 bg-rose-500/10 p-4 text-sm text-rose-200">
-          {transcriptionError}
-        </div>
-      ) : null}
     </section>
   )
 }
 
-function renderStatusLabel(status: RecorderStatus) {
-  switch (status) {
-    case 'idle':
-      return '待機中'
-    case 'initializing':
-      return 'マイク初期化中…'
-    case 'recording':
-      return '録音中'
-    case 'denied':
-      return 'マイク権限が拒否されました'
-    case 'unsupported':
-      return '未対応の環境です'
-    case 'error':
-      return 'エラーが発生しました'
-    default:
-      return '状態不明'
-  }
+type SessionSetupModalProps = {
+  onClose: () => void
+  onCreate: (title: string, duration: number, agendaItems: string[]) => void
+  isCreating: boolean
 }
+
+function SessionSetupModal({ onClose, onCreate, isCreating }: SessionSetupModalProps) {
+  const [title, setTitle] = useState('')
+  const [duration, setDuration] = useState(60) // Default 60 minutes
+  const [agendaItems, setAgendaItems] = useState<string[]>([])
+  const [newAgendaItem, setNewAgendaItem] = useState('')
+
+  const handleAddAgenda = () => {
+    if (newAgendaItem.trim()) {
+      setAgendaItems((prev) => [...prev, newAgendaItem.trim()])
+      setNewAgendaItem('')
+    }
+  }
+
+  const handleRemoveAgenda = (index: number) => {
+    setAgendaItems((prev) => prev.filter((_, i) => i !== index))
+  }
+
+  const handleSubmit = () => {
+    if (title.trim() && agendaItems.length > 0) {
+      onCreate(title.trim(), duration, agendaItems)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-white/95 backdrop-blur-sm">
+      <div className="w-full max-w-2xl space-y-8 p-12">
+        {/* Header */}
+        <div className="space-y-2">
+          <h1 className="text-3xl font-bold text-gray-900">さんま - セッション設定</h1>
+          <p className="text-sm text-gray-600">議論を始める前に、セッションタイトルと議題を設定してください</p>
+        </div>
+
+        {/* Session Title */}
+        <div className="space-y-3">
+          <label className="block text-sm font-medium text-gray-700">セッションタイトル</label>
+          <input
+            type="text"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="例: プロダクト開発ディスカッション 2025-10"
+            className="w-full rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+          />
+        </div>
+
+        {/* Agenda List */}
+        <div className="space-y-3">
+          <label className="block text-sm font-medium text-gray-700">議題リスト</label>
+
+          {/* Agenda Items */}
+          {agendaItems.length > 0 && (
+            <div className="space-y-2">
+              {agendaItems.map((item, index) => (
+                <div key={index} className="flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2.5">
+                  <span className="flex-1 text-sm text-gray-900">{item}</span>
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveAgenda(index)}
+                    className="text-gray-400 hover:text-gray-600"
+                  >
+                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Add New Agenda Item */}
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={newAgendaItem}
+              onChange={(e) => setNewAgendaItem(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  handleAddAgenda()
+                }
+              }}
+              placeholder="新しい議題を入力..."
+              className="flex-1 rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+            />
+            <button
+              type="button"
+              onClick={handleAddAgenda}
+              disabled={!newAgendaItem.trim()}
+              className="rounded-lg bg-black px-5 py-2.5 text-sm font-medium text-white transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              + 追加
+            </button>
+          </div>
+
+          {/* Empty State */}
+          {agendaItems.length === 0 && (
+            <p className="text-center py-8 text-sm text-gray-400">議題を追加してください</p>
+          )}
+        </div>
+
+        {/* Start Button */}
+        <button
+          type="button"
+          onClick={handleSubmit}
+          disabled={isCreating || !title.trim() || agendaItems.length === 0}
+          className="w-full rounded-lg bg-blue-600 px-6 py-4 text-base font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {isCreating ? 'セッションを作成中...' : 'セッションを開始'}
+        </button>
+      </div>
+    </div>
+  )
+}
+

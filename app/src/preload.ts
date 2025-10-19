@@ -11,8 +11,10 @@ const api = {
   }),
   getDatabasePath: () => ipcRenderer.invoke('sanma:get-db-path') as Promise<string>,
   getSessions: () => ipcRenderer.invoke('sanma:get-sessions') as Promise<SessionRecord[]>,
-  createSession: (payload: { title?: string }) =>
+  createSession: (payload: { title?: string; duration?: number; agendaItems?: string[] }) =>
     ipcRenderer.invoke('sanma:create-session', payload) as Promise<SessionRecord>,
+  startSession: (payload: { sessionId: string }) =>
+    ipcRenderer.invoke('sanma:start-session', payload) as Promise<SessionRecord>,
   getAgendas: (payload: { sessionId: string }) =>
     ipcRenderer.invoke('sanma:get-agendas', payload) as Promise<AgendaRecord[]>,
   createAgenda: (payload: { sessionId: string; title: string }) =>

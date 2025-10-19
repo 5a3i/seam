@@ -22,7 +22,7 @@ const DB_FILENAME = 'sanma.db'
 let cachedDbPath: string | null = null
 let db: BetterSqliteDatabase | null = null
 let isDbInitialized = false
-type SessionDbRow = { id: string; title: string; created_at: number }
+type SessionDbRow = { id: string; title: string; duration: number | null; started_at: number | null; created_at: number }
 type AgendaDbRow = { id: string; session_id: string; title: string; order: number; status: string; created_at: number }
 type SuggestionDbRow = {
   id: string
@@ -83,9 +83,24 @@ const ensureSchema = (database: BetterSqliteDatabase) => {
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
+      duration INTEGER,
+      started_at INTEGER,
       created_at INTEGER NOT NULL
     )
   `)
+
+  // Migration: Add duration and started_at columns if they don't exist
+  try {
+    database.exec(`ALTER TABLE sessions ADD COLUMN duration INTEGER`)
+  } catch (err) {
+    // Column already exists, ignore
+  }
+
+  try {
+    database.exec(`ALTER TABLE sessions ADD COLUMN started_at INTEGER`)
+  } catch (err) {
+    // Column already exists, ignore
+  }
 
   database.exec(`
     CREATE TABLE IF NOT EXISTS agendas (
@@ -160,19 +175,21 @@ const seedInitialSession = (database: BetterSqliteDatabase) => {
 const mapSessionRow = (row: SessionDbRow): SessionRecord => ({
   id: row.id,
   title: row.title,
+  duration: row.duration ?? undefined,
+  startedAt: row.started_at ?? undefined,
   createdAt: row.created_at,
 })
 
 const listSessions = (): SessionRecord[] => {
   const database = openDatabase()
   const rows = database
-    .prepare<[], SessionDbRow>('SELECT id, title, created_at FROM sessions ORDER BY created_at DESC LIMIT 20')
+    .prepare<[], SessionDbRow>('SELECT id, title, duration, started_at, created_at FROM sessions ORDER BY created_at DESC LIMIT 20')
     .all()
 
   return rows.map(mapSessionRow)
 }
 
-const createSession = (input: { title?: string } = {}): SessionRecord => {
+const createSession = (input: { title?: string; duration?: number; agendaItems?: string[] } = {}): SessionRecord => {
   const database = openDatabase()
   const title =
     typeof input.title === 'string' && input.title.trim().length > 0
@@ -181,12 +198,30 @@ const createSession = (input: { title?: string } = {}): SessionRecord => {
 
   const now = Date.now()
   const id = randomUUID()
+  const duration = input.duration ?? null
+  const startedAt = null // Will be set when session actually starts
 
-  database.prepare<[string, string, number]>('INSERT INTO sessions (id, title, created_at) VALUES (?, ?, ?)').run(id, title, now)
+  database.prepare<[string, string, number | null, number | null, number]>(
+    'INSERT INTO sessions (id, title, duration, started_at, created_at) VALUES (?, ?, ?, ?, ?)'
+  ).run(id, title, duration, startedAt, now)
+
+  // Create agenda items if provided
+  if (input.agendaItems && input.agendaItems.length > 0) {
+    const insertAgenda = database.prepare<[string, string, string, number, string, number]>(
+      'INSERT INTO agendas (id, session_id, title, "order", status, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+    )
+    input.agendaItems.forEach((agendaTitle, index) => {
+      const agendaId = randomUUID()
+      const status = index === 0 ? 'current' : 'pending'
+      insertAgenda.run(agendaId, id, agendaTitle, index, status, now)
+    })
+  }
 
   return {
     id,
     title,
+    duration: duration ?? undefined,
+    startedAt: startedAt ?? undefined,
     createdAt: now,
   }
 }
@@ -238,6 +273,28 @@ const createAgenda = (input: { sessionId: string; title: string }): AgendaRecord
     order,
     status: 'pending',
     createdAt: now,
+  }
+}
+
+const startSession = (sessionId: string): SessionRecord => {
+  const database = openDatabase()
+  const now = Date.now()
+
+  const existingRow = database
+    .prepare<[string], SessionDbRow>('SELECT id, title, duration, started_at, created_at FROM sessions WHERE id = ?')
+    .get(sessionId)
+
+  if (!existingRow) {
+    throw new Error('Session not found')
+  }
+
+  database
+    .prepare<[number, string]>('UPDATE sessions SET started_at = ? WHERE id = ?')
+    .run(now, sessionId)
+
+  return {
+    ...mapSessionRow(existingRow),
+    startedAt: now,
   }
 }
 
@@ -496,7 +553,8 @@ const registerIpcHandlers = () => {
 
   ipcMain.handle('sanma:get-db-path', () => resolveDbPath())
   ipcMain.handle('sanma:get-sessions', () => listSessions())
-  ipcMain.handle('sanma:create-session', (_event, payload: { title?: string }) => createSession(payload ?? {}))
+  ipcMain.handle('sanma:create-session', (_event, payload: { title?: string; duration?: number; agendaItems?: string[] }) => createSession(payload ?? {}))
+  ipcMain.handle('sanma:start-session', (_event, payload: { sessionId: string }) => startSession(payload.sessionId))
 
   ipcMain.handle('sanma:get-agendas', (_event, payload: { sessionId: string }) => listAgendas(payload.sessionId))
   ipcMain.handle('sanma:create-agenda', (_event, payload: { sessionId: string; title: string }) => createAgenda(payload))
@@ -611,7 +669,9 @@ const createWindow = async () => {
   if (!app.isPackaged && devServerUrl) {
     await mainWindow.loadURL(devServerUrl)
   } else {
-    await mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    // In packaged app, dist files are in the same directory structure
+    const indexPath = join(__dirname, '../dist/index.html')
+    await mainWindow.loadFile(indexPath)
   }
 
   mainWindow.on('closed', () => {
@@ -645,7 +705,13 @@ const resolveSpeechBinary = () => {
     return process.env.SANMA_SPEECH_BIN
   }
 
-  const baseDir = app.isPackaged ? app.getAppPath() : join(app.getAppPath(), '..')
+  if (app.isPackaged) {
+    // In packaged app, speech binary is in Contents/Resources/speech
+    return resolvePath(process.resourcesPath, 'speech')
+  }
+
+  // In development, use the build from native/speech
+  const baseDir = join(app.getAppPath(), '..')
   return resolvePath(baseDir, 'native', 'speech', '.build', 'debug', 'speech')
 }
 
