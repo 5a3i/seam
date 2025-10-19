@@ -48,3 +48,11 @@ export type TranscriptionRecord = {
   confidence: number
   createdAt: number
 }
+
+export type SummaryRecord = {
+  id: string
+  sessionId: string
+  content: string
+  createdAt: number
+  updatedAt: number
+}

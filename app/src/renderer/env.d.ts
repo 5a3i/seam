@@ -1,9 +1,9 @@
-import type { SanmaApi } from '../preload'
+import type { SeamApi } from '../preload'
 
 export {}
 
 declare global {
   interface Window {
-    sanma: SanmaApi
+    seam: SeamApi
   }
 }

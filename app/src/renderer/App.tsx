@@ -23,14 +23,14 @@ export function App() {
   const [isCreating, setIsCreating] = useState(false)
   const [showSessionSetup, setShowSessionSetup] = useState(false)
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
-  const [view, setView] = useState<'list' | 'setup' | 'detail'>('list')
+  const [view, setView] = useState<'list' | 'setup' | 'detail' | 'settings'>('list')
 
   const loadSessions = useCallback(async () => {
     try {
-      const records = await window.sanma.getSessions()
+      const records = await window.seam.getSessions()
       setSessions(records)
     } catch (err) {
-      console.error('[sanma] failed to load sessions', err)
+      console.error('[seam] failed to load sessions', err)
     }
   }, [])
 
@@ -46,15 +46,15 @@ export function App() {
   const handleCreateSession = useCallback(async (title: string, duration: number, agendaItems: string[]) => {
     try {
       setIsCreating(true)
-      const session = await window.sanma.createSession({ title, duration, agendaItems })
+      const session = await window.seam.createSession({ title, duration, agendaItems })
       // Start the session immediately
-      const startedSession = await window.sanma.startSession({ sessionId: session.id })
+      const startedSession = await window.seam.startSession({ sessionId: session.id })
       setSessions((prev) => [startedSession, ...prev.filter(s => s.id !== session.id)])
       setSelectedSessionId(startedSession.id)
       setView('detail')
       setShowSessionSetup(false)
     } catch (err) {
-      console.error('[sanma] failed to create session', err)
+      console.error('[seam] failed to create session', err)
     } finally {
       setIsCreating(false)
     }
@@ -70,6 +70,19 @@ export function App() {
     setSelectedSessionId(null)
     void loadSessions()
   }, [loadSessions])
+
+  const handleOpenSettings = useCallback(() => {
+    setView('settings')
+  }, [])
+
+  // Show settings screen
+  if (view === 'settings') {
+    return (
+      <SettingsScreen
+        onClose={() => setView('list')}
+      />
+    )
+  }
 
   // Show session setup modal
   if (view === 'setup') {
@@ -92,6 +105,7 @@ export function App() {
         sessions={sessions}
         onSelectSession={handleSelectSession}
         onCreateNew={handleOpenSessionSetup}
+        onOpenSettings={handleOpenSettings}
       />
     )
   }
@@ -136,7 +150,7 @@ export function App() {
           type="button"
           onClick={async () => {
             if (selectedSession.id) {
-              await window.sanma.endSession({ sessionId: selectedSession.id })
+              await window.seam.endSession({ sessionId: selectedSession.id })
               handleBackToList()
             }
           }}
@@ -176,27 +190,37 @@ type SessionListScreenProps = {
   sessions: SessionRecord[]
   onSelectSession: (sessionId: string) => void
   onCreateNew: () => void
+  onOpenSettings: () => void
 }
 
-function SessionListScreen({ sessions, onSelectSession, onCreateNew }: SessionListScreenProps) {
+function SessionListScreen({ sessions, onSelectSession, onCreateNew, onOpenSettings }: SessionListScreenProps) {
   return (
     <main className="flex h-screen flex-col bg-gradient-to-br from-slate-50 to-slate-100">
       {/* Header */}
       <header className="border-b border-slate-200 bg-white/80 px-8 py-6 backdrop-blur-sm">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold text-gray-900">さんま - セッション一覧</h1>
+            <h1 className="text-2xl font-bold text-gray-900">Seam - セッション一覧</h1>
             <p className="mt-1 text-sm text-gray-600">
               {sessions.length > 0 ? `${sessions.length}件のセッション` : 'セッションがまだありません'}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={onCreateNew}
-            className="rounded-lg bg-blue-600 px-6 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700"
-          >
-            + 新規セッション
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              className="rounded-lg border border-slate-300 bg-white px-4 py-3 text-sm font-semibold text-gray-700 shadow-sm transition hover:bg-slate-50"
+            >
+              ⚙️ 設定
+            </button>
+            <button
+              type="button"
+              onClick={onCreateNew}
+              className="rounded-lg bg-blue-600 px-6 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700"
+            >
+              + 新規セッション
+            </button>
+          </div>
         </div>
       </header>
 
@@ -307,10 +331,10 @@ function AgendaPanel({ session, onTriggerAISummary }: AgendaPanelProps) {
 
     try {
       setIsLoading(true)
-      const records = await window.sanma.getAgendas({ sessionId })
+      const records = await window.seam.getAgendas({ sessionId })
       setAgendas(records)
     } catch (err) {
-      console.error('[sanma] failed to load agendas', err)
+      console.error('[seam] failed to load agendas', err)
     } finally {
       setIsLoading(false)
     }
@@ -390,11 +414,11 @@ function SuggestionPanel({ sessionId }: SuggestionPanelProps) {
     try {
       setIsLoading(true)
       setError(null)
-      const records = await window.sanma.getSuggestions({ sessionId, limit: 5 })
+      const records = await window.seam.getSuggestions({ sessionId, limit: 5 })
       setSuggestions(records)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
-      console.error('[sanma] failed to load suggestions', err)
+      console.error('[seam] failed to load suggestions', err)
     } finally {
       setIsLoading(false)
     }
@@ -410,11 +434,11 @@ function SuggestionPanel({ sessionId }: SuggestionPanelProps) {
     try {
       setIsGenerating(true)
       setError(null)
-      const suggestion = await window.sanma.generateSuggestion({ sessionId })
+      const suggestion = await window.seam.generateSuggestion({ sessionId })
       setSuggestions((prev) => [suggestion, ...prev.slice(0, 4)])
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
-      console.error('[sanma] failed to generate suggestion', err)
+      console.error('[seam] failed to generate suggestion', err)
     } finally {
       setIsGenerating(false)
     }
@@ -576,16 +600,42 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
   const [isSummaryGenerating, setIsSummaryGenerating] = useState(false)
   const summaryTimerRef = useRef<number | null>(null)
 
+  // Load existing summary when component mounts or sessionId changes
+  useEffect(() => {
+    const loadSummary = async () => {
+      if (!sessionId) {
+        setSummary('')
+        setSummaryUpdatedAt(null)
+        return
+      }
+
+      try {
+        const summaryRecord = await window.seam.getSummary({ sessionId })
+        if (summaryRecord) {
+          setSummary(summaryRecord.content)
+          setSummaryUpdatedAt(summaryRecord.updatedAt)
+        } else {
+          setSummary('')
+          setSummaryUpdatedAt(null)
+        }
+      } catch (error) {
+        console.error('[seam] Failed to load summary:', error)
+      }
+    }
+
+    void loadSummary()
+  }, [sessionId])
+
   const generateAndUpdateSummary = useCallback(async () => {
     if (!sessionId || isSummaryGenerating) return
 
     try {
       setIsSummaryGenerating(true)
-      const newSummary = await window.sanma.generateSummary({ sessionId })
+      const newSummary = await window.seam.generateSummary({ sessionId })
       setSummary(newSummary)
       setSummaryUpdatedAt(Date.now())
     } catch (error) {
-      console.error('[sanma] Failed to generate summary:', error)
+      console.error('[seam] Failed to generate summary:', error)
     } finally {
       setIsSummaryGenerating(false)
     }
@@ -655,7 +705,7 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
       try {
         const arrayBuffer = await blob.arrayBuffer()
         const payload = new Uint8Array(arrayBuffer)
-        const result = await window.sanma.transcribeAudio({
+        const result = await window.seam.transcribeAudio({
           data: payload,
           mimeType: blob.type || mimeTypeRef.current,
         })
@@ -668,15 +718,15 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
         // Save transcription to database
         if (sessionId && result.text) {
           try {
-            await window.sanma.saveTranscription({
+            await window.seam.saveTranscription({
               sessionId,
               text: result.text,
               locale: result.locale,
               confidence: result.confidence,
             })
-            console.log('[sanma] Transcription saved to database', options.isChunk ? '(chunk)' : '')
+            console.log('[seam] Transcription saved to database', options.isChunk ? '(chunk)' : '')
           } catch (err) {
-            console.error('[sanma] Failed to save transcription:', err)
+            console.error('[seam] Failed to save transcription:', err)
           }
         }
       } catch (error) {
@@ -684,7 +734,7 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
           setTranscriptionStatus('error')
           setTranscriptionError(error instanceof Error ? error.message : String(error))
         } else {
-          console.error('[sanma] Chunk transcription failed:', error)
+          console.error('[seam] Chunk transcription failed:', error)
         }
       }
     },
@@ -694,7 +744,7 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
   const transcribeChunk = useCallback(
     async (blob: Blob) => {
       if (transcriptionQueueRef.current) {
-        console.log('[sanma] Transcription already in progress, skipping chunk')
+        console.log('[seam] Transcription already in progress, skipping chunk')
         return
       }
 
@@ -710,11 +760,11 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
 
   const startContinuousRecordingCycle = useCallback(async () => {
     if (!streamRef.current) {
-      console.error('[sanma] No stream available for continuous recording')
+      console.error('[seam] No stream available for continuous recording')
       return
     }
 
-    console.log('[sanma] Starting new continuous recording cycle...')
+    console.log('[seam] Starting new continuous recording cycle...')
 
     const stream = streamRef.current
     const supportedType = preferredMimeTypes.find((type) => MediaRecorder.isTypeSupported(type))
@@ -734,7 +784,7 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
     }
 
     const handleStop = () => {
-      console.log('[sanma] Recorder stopped, processing chunks...')
+      console.log('[seam] Recorder stopped, processing chunks...')
       const parts = chunksRef.current.slice()
       const mimeType = recorder.mimeType || mimeTypeRef.current || 'audio/webm'
 
@@ -755,12 +805,12 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
 
       // Start next cycle if still in continuous mode
       if (continuousModeRef.current && streamRef.current) {
-        console.log('[sanma] Scheduling next cycle in 500ms...')
+        console.log('[seam] Scheduling next cycle in 500ms...')
         continuousCycleTimerRef.current = window.setTimeout(() => {
           void startContinuousRecordingCycle()
         }, 500) // Small delay between cycles
       } else {
-        console.log('[sanma] Not starting next cycle. continuousMode:', continuousModeRef.current, 'stream:', !!streamRef.current)
+        console.log('[seam] Not starting next cycle. continuousMode:', continuousModeRef.current, 'stream:', !!streamRef.current)
       }
     }
 
@@ -768,15 +818,15 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
     recorder.addEventListener('stop', handleStop)
 
     recorder.start()
-    console.log('[sanma] Recorder started, will stop in 10 seconds')
+    console.log('[seam] Recorder started, will stop in 10 seconds')
 
     // Stop this recording after 10 seconds
     continuousCycleTimerRef.current = window.setTimeout(() => {
-      console.log('[sanma] 10 seconds elapsed, stopping recorder...')
+      console.log('[seam] 10 seconds elapsed, stopping recorder...')
       if (recorderRef.current && recorderRef.current.state === 'recording') {
         recorderRef.current.stop()
       } else {
-        console.log('[sanma] Recorder not in recording state:', recorderRef.current?.state)
+        console.log('[seam] Recorder not in recording state:', recorderRef.current?.state)
       }
     }, 10000)
   }, [preferredMimeTypes, transcribeChunk])
@@ -1033,6 +1083,151 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
   )
 }
 
+type SettingsScreenProps = {
+  onClose: () => void
+}
+
+function SettingsScreen({ onClose }: SettingsScreenProps) {
+  const [geminiApiKey, setGeminiApiKey] = useState('')
+  const [isLoading, setIsLoading] = useState(true)
+  const [isSaving, setIsSaving] = useState(false)
+  const [saveSuccess, setSaveSuccess] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const loadSettings = async () => {
+      try {
+        setIsLoading(true)
+        const apiKey = await window.seam.getSetting({ key: 'gemini_api_key' })
+        if (apiKey) {
+          setGeminiApiKey(apiKey)
+        }
+      } catch (err) {
+        console.error('[seam] Failed to load settings:', err)
+        setError(err instanceof Error ? err.message : String(err))
+      } finally {
+        setIsLoading(false)
+      }
+    }
+    void loadSettings()
+  }, [])
+
+  const handleSave = async () => {
+    try {
+      setIsSaving(true)
+      setError(null)
+      setSaveSuccess(false)
+
+      await window.seam.setSetting({ key: 'gemini_api_key', value: geminiApiKey })
+
+      setSaveSuccess(true)
+      setTimeout(() => setSaveSuccess(false), 3000)
+    } catch (err) {
+      console.error('[seam] Failed to save settings:', err)
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  return (
+    <main className="flex h-screen flex-col bg-gradient-to-br from-slate-50 to-slate-100">
+      {/* Header */}
+      <header className="border-b border-slate-200 bg-white/80 px-8 py-6 backdrop-blur-sm">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">設定</h1>
+            <p className="mt-1 text-sm text-gray-600">Gemini API キーの設定</p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:bg-slate-50"
+          >
+            ← 戻る
+          </button>
+        </div>
+      </header>
+
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto p-8">
+        <div className="mx-auto max-w-2xl">
+          <div className="rounded-xl border border-slate-200 bg-white p-8 shadow-sm">
+            <h2 className="mb-6 text-lg font-semibold text-gray-900">Gemini API キー</h2>
+
+            {isLoading ? (
+              <div className="flex items-center justify-center py-8">
+                <div className="h-8 w-8 animate-spin rounded-full border-4 border-blue-600 border-t-transparent" />
+              </div>
+            ) : (
+              <div className="space-y-6">
+                {/* Info box */}
+                <div className="rounded-lg border border-blue-200 bg-blue-50 p-4">
+                  <p className="text-sm text-blue-900">
+                    AI機能（サマリ生成、提案生成）を使用するには、Gemini API キーが必要です。
+                    <br />
+                    <a
+                      href="https://aistudio.google.com/app/apikey"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="mt-2 inline-block font-medium text-blue-700 underline hover:text-blue-800"
+                    >
+                      Google AI Studio でAPIキーを取得 →
+                    </a>
+                  </p>
+                </div>
+
+                {/* API Key input */}
+                <div className="space-y-3">
+                  <label className="block text-sm font-medium text-gray-700">
+                    APIキー
+                  </label>
+                  <input
+                    type="password"
+                    value={geminiApiKey}
+                    onChange={(e) => setGeminiApiKey(e.target.value)}
+                    placeholder="AIza..."
+                    className="w-full rounded-lg border border-gray-300 bg-white px-4 py-3 text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  />
+                  <p className="text-xs text-gray-500">
+                    APIキーは暗号化されてローカルに保存されます
+                  </p>
+                </div>
+
+                {/* Error message */}
+                {error && (
+                  <div className="rounded-lg border border-red-200 bg-red-50 p-4">
+                    <p className="text-sm text-red-900">{error}</p>
+                  </div>
+                )}
+
+                {/* Success message */}
+                {saveSuccess && (
+                  <div className="rounded-lg border border-green-200 bg-green-50 p-4">
+                    <p className="text-sm text-green-900">✓ 保存しました</p>
+                  </div>
+                )}
+
+                {/* Save button */}
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={handleSave}
+                    disabled={isSaving || !geminiApiKey.trim()}
+                    className="rounded-lg bg-blue-600 px-6 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {isSaving ? '保存中...' : '保存'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </main>
+  )
+}
+
 type SessionSetupModalProps = {
   onClose: () => void
   onCreate: (title: string, duration: number, agendaItems: string[]) => void
@@ -1067,7 +1262,7 @@ function SessionSetupModal({ onClose, onCreate, isCreating }: SessionSetupModalP
       <div className="w-full max-w-2xl space-y-8 p-12">
         {/* Header */}
         <div className="space-y-2">
-          <h1 className="text-3xl font-bold text-gray-900">さんま - セッション設定</h1>
+          <h1 className="text-3xl font-bold text-gray-900">Seam - セッション設定</h1>
           <p className="text-sm text-gray-600">議論を始める前に、セッションタイトルと議題を設定してください</p>
         </div>
 

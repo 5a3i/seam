@@ -8,7 +8,7 @@ import { mkdirSync, existsSync, promises as fsPromises } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { GoogleGenerativeAI } from '@google/generative-ai'
-import type { SessionRecord, AgendaRecord, TranscriptionResult, SuggestionRecord, TranscriptionRecord } from './shared/types'
+import type { SessionRecord, AgendaRecord, TranscriptionResult, SuggestionRecord, TranscriptionRecord, SummaryRecord } from './shared/types'
 import type { Database as BetterSqliteDatabase } from 'better-sqlite3'
 
 const require = createRequire(import.meta.url)
@@ -18,7 +18,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
 let mainWindow: BrowserWindow | null = null
-const DB_FILENAME = 'sanma.db'
+const DB_FILENAME = 'seam.db'
 let cachedDbPath: string | null = null
 let db: BetterSqliteDatabase | null = null
 let isDbInitialized = false
@@ -43,6 +43,13 @@ type TranscriptionDbRow = {
 type SettingDbRow = {
   key: string
   value: string
+  updated_at: number
+}
+type SummaryDbRow = {
+  id: string
+  session_id: string
+  content: string
+  created_at: number
   updated_at: number
 }
 
@@ -162,6 +169,21 @@ const ensureSchema = (database: BetterSqliteDatabase) => {
       value TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     )
+  `)
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS summaries (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL UNIQUE,
+      content TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    )
+  `)
+
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_summaries_session ON summaries(session_id)
   `)
 }
 
@@ -494,6 +516,65 @@ const setSetting = (key: string, value: string): void => {
     .run(key, value, now)
 }
 
+const mapSummaryRow = (row: SummaryDbRow): SummaryRecord => ({
+  id: row.id,
+  sessionId: row.session_id,
+  content: row.content,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+})
+
+const getSummary = (sessionId: string): SummaryRecord | null => {
+  const database = openDatabase()
+  const row = database
+    .prepare<[string], SummaryDbRow>(
+      'SELECT id, session_id, content, created_at, updated_at FROM summaries WHERE session_id = ?'
+    )
+    .get(sessionId)
+
+  return row ? mapSummaryRow(row) : null
+}
+
+const saveSummary = (input: { sessionId: string; content: string }): SummaryRecord => {
+  const database = openDatabase()
+  const { sessionId, content } = input
+  const now = Date.now()
+
+  // Check if summary already exists
+  const existing = getSummary(sessionId)
+
+  if (existing) {
+    // Update existing summary
+    database
+      .prepare<[string, number, string]>(
+        'UPDATE summaries SET content = ?, updated_at = ? WHERE session_id = ?'
+      )
+      .run(content, now, sessionId)
+
+    return {
+      ...existing,
+      content,
+      updatedAt: now,
+    }
+  } else {
+    // Create new summary
+    const id = randomUUID()
+    database
+      .prepare<[string, string, string, number, number]>(
+        'INSERT INTO summaries (id, session_id, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
+      )
+      .run(id, sessionId, content, now, now)
+
+    return {
+      id,
+      sessionId,
+      content,
+      createdAt: now,
+      updatedAt: now,
+    }
+  }
+}
+
 const generateAiSuggestion = async (input: {
   sessionId: string
   currentAgendaTitle?: string
@@ -628,57 +709,64 @@ JSON形式ではなく、読みやすい日本語の文章で回答してくだ�
 
   console.log('[Summary] Generated summary:', text.substring(0, 100) + '...')
 
-  return text.trim()
+  // Save summary to database
+  const summaryContent = text.trim()
+  saveSummary({ sessionId: input.sessionId, content: summaryContent })
+
+  return summaryContent
 }
 
 const registerIpcHandlers = () => {
   openDatabase()
 
-  ipcMain.handle('sanma:get-db-path', () => resolveDbPath())
-  ipcMain.handle('sanma:get-sessions', () => listSessions())
-  ipcMain.handle('sanma:create-session', (_event, payload: { title?: string; duration?: number; agendaItems?: string[] }) => createSession(payload ?? {}))
-  ipcMain.handle('sanma:start-session', (_event, payload: { sessionId: string }) => startSession(payload.sessionId))
-  ipcMain.handle('sanma:end-session', (_event, payload: { sessionId: string }) => endSession(payload.sessionId))
+  ipcMain.handle('seam:get-db-path', () => resolveDbPath())
+  ipcMain.handle('seam:get-sessions', () => listSessions())
+  ipcMain.handle('seam:create-session', (_event, payload: { title?: string; duration?: number; agendaItems?: string[] }) => createSession(payload ?? {}))
+  ipcMain.handle('seam:start-session', (_event, payload: { sessionId: string }) => startSession(payload.sessionId))
+  ipcMain.handle('seam:end-session', (_event, payload: { sessionId: string }) => endSession(payload.sessionId))
 
-  ipcMain.handle('sanma:get-agendas', (_event, payload: { sessionId: string }) => listAgendas(payload.sessionId))
-  ipcMain.handle('sanma:create-agenda', (_event, payload: { sessionId: string; title: string }) => createAgenda(payload))
-  ipcMain.handle('sanma:update-agenda', (_event, payload: { id: string; title?: string; status?: string }) => updateAgenda(payload))
-  ipcMain.handle('sanma:delete-agenda', (_event, payload: { id: string }) => deleteAgenda(payload.id))
-  ipcMain.handle('sanma:reorder-agendas', (_event, payload: { sessionId: string; agendaIds: string[] }) => reorderAgendas(payload))
+  ipcMain.handle('seam:get-agendas', (_event, payload: { sessionId: string }) => listAgendas(payload.sessionId))
+  ipcMain.handle('seam:create-agenda', (_event, payload: { sessionId: string; title: string }) => createAgenda(payload))
+  ipcMain.handle('seam:update-agenda', (_event, payload: { id: string; title?: string; status?: string }) => updateAgenda(payload))
+  ipcMain.handle('seam:delete-agenda', (_event, payload: { id: string }) => deleteAgenda(payload.id))
+  ipcMain.handle('seam:reorder-agendas', (_event, payload: { sessionId: string; agendaIds: string[] }) => reorderAgendas(payload))
 
-  ipcMain.handle('sanma:get-suggestions', (_event, payload: { sessionId: string; limit?: number }) =>
+  ipcMain.handle('seam:get-suggestions', (_event, payload: { sessionId: string; limit?: number }) =>
     listSuggestions(payload.sessionId, payload.limit)
   )
   ipcMain.handle(
-    'sanma:generate-suggestion',
+    'seam:generate-suggestion',
     async (_event, payload: { sessionId: string; currentAgendaTitle?: string; nextAgendaTitle?: string }) =>
       generateAiSuggestion(payload)
   )
 
   ipcMain.handle(
-    'sanma:generate-summary',
+    'seam:generate-summary',
     async (_event, payload: { sessionId: string; secondsAgo?: number }) =>
       generateSummary(payload)
   )
 
   ipcMain.handle(
-    'sanma:save-transcription',
+    'seam:save-transcription',
     (_event, payload: { sessionId: string; text: string; locale: string; confidence: number }) =>
       createTranscription(payload)
   )
 
   ipcMain.handle(
-    'sanma:get-transcriptions',
+    'seam:get-transcriptions',
     (_event, payload: { sessionId: string; secondsAgo?: number }) =>
       getRecentTranscriptions(payload.sessionId, payload.secondsAgo ?? 180)
   )
 
-  ipcMain.handle('sanma:get-setting', (_event, payload: { key: string }) => getSetting(payload.key))
-  ipcMain.handle('sanma:set-setting', (_event, payload: { key: string; value: string }) => {
+  ipcMain.handle('seam:get-setting', (_event, payload: { key: string }) => getSetting(payload.key))
+  ipcMain.handle('seam:set-setting', (_event, payload: { key: string; value: string }) => {
     setSetting(payload.key, payload.value)
   })
 
-  ipcMain.handle('sanma:transcribe-audio', async (_event, payload: { path: string; locale?: string }) => {
+  ipcMain.handle('seam:get-summary', (_event, payload: { sessionId: string }) => getSummary(payload.sessionId))
+  ipcMain.handle('seam:save-summary', (_event, payload: { sessionId: string; content: string }) => saveSummary(payload))
+
+  ipcMain.handle('seam:transcribe-audio', async (_event, payload: { path: string; locale?: string }) => {
     if (!payload?.path) {
       throw new Error('Audio path is required')
     }
@@ -686,7 +774,7 @@ const registerIpcHandlers = () => {
     return transcribeAudioFile(payload.path, payload.locale)
   })
   ipcMain.handle(
-    'sanma:transcribe-buffer',
+    'seam:transcribe-buffer',
     async (
       _event,
       payload: { data: ArrayBuffer | Uint8Array | Buffer; mimeType: string; locale?: string },
@@ -708,7 +796,7 @@ const registerIpcHandlers = () => {
 
       const mimeType = payload.mimeType ?? 'audio/mp4'
       const extension = extensionFromMime(mimeType)
-      const tempPath = join(tmpdir(), `sanma-audio-${randomUUID()}.${extension}`)
+      const tempPath = join(tmpdir(), `seam-audio-${randomUUID()}.${extension}`)
 
       console.log('[transcribe-buffer] Writing audio buffer:', {
         size: buffer.length,
@@ -797,8 +885,8 @@ app.on('window-all-closed', () => {
 })
 
 const resolveSpeechBinary = () => {
-  if (process.env.SANMA_SPEECH_BIN) {
-    return process.env.SANMA_SPEECH_BIN
+  if (process.env.SEAM_SPEECH_BIN) {
+    return process.env.SEAM_SPEECH_BIN
   }
 
   if (app.isPackaged) {
