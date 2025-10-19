@@ -8,6 +8,8 @@ pnpm-debug.log*
 # Builds
 dist/
 dist-electron/
+release/
+native/speech/.build/
 
 # Editor
 .DS_Store
@@ -17,6 +19,8 @@ dist-electron/
 # Runtime data
 sanma.sqlite
 Sanma/settings.json
+app/.env
 
 # Tool caches
 .corepack/
+native/speech/.clang-module-cache/

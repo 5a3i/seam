@@ -15,6 +15,8 @@ const api = {
     ipcRenderer.invoke('sanma:create-session', payload) as Promise<SessionRecord>,
   startSession: (payload: { sessionId: string }) =>
     ipcRenderer.invoke('sanma:start-session', payload) as Promise<SessionRecord>,
+  endSession: (payload: { sessionId: string }) =>
+    ipcRenderer.invoke('sanma:end-session', payload) as Promise<SessionRecord>,
   getAgendas: (payload: { sessionId: string }) =>
     ipcRenderer.invoke('sanma:get-agendas', payload) as Promise<AgendaRecord[]>,
   createAgenda: (payload: { sessionId: string; title: string }) =>

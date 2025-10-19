@@ -22,6 +22,8 @@ export function App() {
   const [sessions, setSessions] = useState<SessionRecord[]>([])
   const [isCreating, setIsCreating] = useState(false)
   const [showSessionSetup, setShowSessionSetup] = useState(false)
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
+  const [view, setView] = useState<'list' | 'setup' | 'detail'>('list')
 
   const loadSessions = useCallback(async () => {
     try {
@@ -37,6 +39,7 @@ export function App() {
   }, [loadSessions])
 
   const handleOpenSessionSetup = useCallback(() => {
+    setView('setup')
     setShowSessionSetup(true)
   }, [])
 
@@ -47,6 +50,8 @@ export function App() {
       // Start the session immediately
       const startedSession = await window.sanma.startSession({ sessionId: session.id })
       setSessions((prev) => [startedSession, ...prev.filter(s => s.id !== session.id)])
+      setSelectedSessionId(startedSession.id)
+      setView('detail')
       setShowSessionSetup(false)
     } catch (err) {
       console.error('[sanma] failed to create session', err)
@@ -55,15 +60,50 @@ export function App() {
     }
   }, [])
 
-  const activeSession = sessions.find((s) => s.startedAt && !s.endedAt) || sessions[0]
+  const handleSelectSession = useCallback((sessionId: string) => {
+    setSelectedSessionId(sessionId)
+    setView('detail')
+  }, [])
 
-  // Show session setup if no active session or explicitly requested
-  if (!activeSession || showSessionSetup) {
+  const handleBackToList = useCallback(() => {
+    setView('list')
+    setSelectedSessionId(null)
+    void loadSessions()
+  }, [loadSessions])
+
+  // Show session setup modal
+  if (view === 'setup') {
     return (
       <SessionSetupModal
-        onClose={() => setShowSessionSetup(false)}
+        onClose={() => {
+          setShowSessionSetup(false)
+          setView('list')
+        }}
         onCreate={handleCreateSession}
         isCreating={isCreating}
+      />
+    )
+  }
+
+  // Show session list
+  if (view === 'list') {
+    return (
+      <SessionListScreen
+        sessions={sessions}
+        onSelectSession={handleSelectSession}
+        onCreateNew={handleOpenSessionSetup}
+      />
+    )
+  }
+
+  // Show session detail
+  const selectedSession = sessions.find((s) => s.id === selectedSessionId)
+  if (!selectedSession) {
+    return (
+      <SessionListScreen
+        sessions={sessions}
+        onSelectSession={handleSelectSession}
+        onCreateNew={handleOpenSessionSetup}
       />
     )
   }
@@ -73,9 +113,16 @@ export function App() {
       {/* Top Bar */}
       <header className="flex items-center justify-between border-b border-slate-800 bg-slate-900 px-6 py-3">
         <div className="flex items-center gap-4">
-          <h1 className="text-lg font-semibold text-slate-100">{activeSession.title}</h1>
+          <button
+            type="button"
+            onClick={handleBackToList}
+            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm font-medium text-slate-200 transition hover:bg-slate-700"
+          >
+            ← 一覧
+          </button>
+          <h1 className="text-lg font-semibold text-slate-100">{selectedSession.title}</h1>
           <span className="text-sm text-slate-400">
-            {new Date(activeSession.startedAt!).toLocaleString('ja-JP', {
+            {selectedSession.startedAt && new Date(selectedSession.startedAt).toLocaleString('ja-JP', {
               year: 'numeric',
               month: '2-digit',
               day: '2-digit',
@@ -88,10 +135,9 @@ export function App() {
         <button
           type="button"
           onClick={async () => {
-            if (activeSession.id) {
-              await window.sanma.endSession({ sessionId: activeSession.id })
-              setShowSessionSetup(true)
-              await loadSessions()
+            if (selectedSession.id) {
+              await window.sanma.endSession({ sessionId: selectedSession.id })
+              handleBackToList()
             }
           }}
           className="rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium text-slate-200 transition hover:bg-slate-700"
@@ -105,7 +151,7 @@ export function App() {
         {/* Left Sidebar - Agenda */}
         <aside className="w-80 border-r border-slate-800 bg-slate-900/50 overflow-y-auto">
           <AgendaPanel
-            session={activeSession}
+            session={selectedSession}
             onTriggerAISummary={() => {
               window.dispatchEvent(new CustomEvent('trigger-ai-summary'))
             }}
@@ -114,13 +160,130 @@ export function App() {
 
         {/* Center - Live Transcription */}
         <main className="flex-1 overflow-y-auto bg-slate-950/30">
-          <MicrophonePanel sessionId={activeSession.id} />
+          <MicrophonePanel sessionId={selectedSession.id} />
         </main>
 
         {/* Right Sidebar - AI Suggestions */}
         <aside className="w-96 border-l border-slate-800 bg-slate-900/50 overflow-y-auto">
-          <SuggestionPanel sessionId={activeSession.id} />
+          <SuggestionPanel sessionId={selectedSession.id} />
         </aside>
+      </div>
+    </main>
+  )
+}
+
+type SessionListScreenProps = {
+  sessions: SessionRecord[]
+  onSelectSession: (sessionId: string) => void
+  onCreateNew: () => void
+}
+
+function SessionListScreen({ sessions, onSelectSession, onCreateNew }: SessionListScreenProps) {
+  return (
+    <main className="flex h-screen flex-col bg-gradient-to-br from-slate-50 to-slate-100">
+      {/* Header */}
+      <header className="border-b border-slate-200 bg-white/80 px-8 py-6 backdrop-blur-sm">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">さんま - セッション一覧</h1>
+            <p className="mt-1 text-sm text-gray-600">
+              {sessions.length > 0 ? `${sessions.length}件のセッション` : 'セッションがまだありません'}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onCreateNew}
+            className="rounded-lg bg-blue-600 px-6 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700"
+          >
+            + 新規セッション
+          </button>
+        </div>
+      </header>
+
+      {/* Session List */}
+      <div className="flex-1 overflow-y-auto p-8">
+        {sessions.length === 0 ? (
+          <div className="flex h-full items-center justify-center">
+            <div className="text-center">
+              <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-gray-200">
+                <svg className="h-8 w-8 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+                </svg>
+              </div>
+              <h3 className="mb-2 text-lg font-medium text-gray-900">セッションがありません</h3>
+              <p className="mb-6 text-sm text-gray-500">
+                新規セッションボタンをクリックして、最初のディスカッションを開始しましょう
+              </p>
+              <button
+                type="button"
+                onClick={onCreateNew}
+                className="rounded-lg bg-blue-600 px-6 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700"
+              >
+                + 新規セッション
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {sessions.map((session) => {
+              const isActive = session.startedAt && !session.endedAt
+              const duration = session.duration ? `${session.duration}分` : ''
+              const startedDate = session.startedAt
+                ? new Date(session.startedAt).toLocaleString('ja-JP', {
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })
+                : new Date(session.createdAt).toLocaleString('ja-JP', {
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })
+
+              return (
+                <button
+                  key={session.id}
+                  onClick={() => onSelectSession(session.id)}
+                  className="group relative rounded-xl border border-slate-200 bg-white p-6 text-left shadow-sm transition hover:border-blue-300 hover:shadow-md"
+                >
+                  {isActive && (
+                    <div className="absolute right-4 top-4 flex items-center gap-1.5 rounded-full bg-green-100 px-2.5 py-1 text-xs font-medium text-green-700">
+                      <div className="h-1.5 w-1.5 animate-pulse rounded-full bg-green-500" />
+                      進行中
+                    </div>
+                  )}
+
+                  <h3 className="mb-2 text-base font-semibold text-gray-900 group-hover:text-blue-600">
+                    {session.title}
+                  </h3>
+
+                  <div className="space-y-1.5 text-xs text-gray-500">
+                    <div className="flex items-center gap-1.5">
+                      <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      {startedDate}
+                    </div>
+                    {duration && (
+                      <div className="flex items-center gap-1.5">
+                        <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                        </svg>
+                        {duration}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="mt-4 text-xs font-medium text-blue-600 opacity-0 transition group-hover:opacity-100">
+                    詳細を見る →
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+        )}
       </div>
     </main>
   )

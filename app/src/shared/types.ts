@@ -3,6 +3,7 @@ export type SessionRecord = {
   title: string
   duration?: number // Session duration in minutes
   startedAt?: number // Unix timestamp when session started
+  endedAt?: number // Unix timestamp when session ended
   createdAt: number
 }
 

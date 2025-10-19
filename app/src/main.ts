@@ -22,7 +22,7 @@ const DB_FILENAME = 'sanma.db'
 let cachedDbPath: string | null = null
 let db: BetterSqliteDatabase | null = null
 let isDbInitialized = false
-type SessionDbRow = { id: string; title: string; duration: number | null; started_at: number | null; created_at: number }
+type SessionDbRow = { id: string; title: string; duration: number | null; started_at: number | null; ended_at: number | null; created_at: number }
 type AgendaDbRow = { id: string; session_id: string; title: string; order: number; status: string; created_at: number }
 type SuggestionDbRow = {
   id: string
@@ -89,7 +89,7 @@ const ensureSchema = (database: BetterSqliteDatabase) => {
     )
   `)
 
-  // Migration: Add duration and started_at columns if they don't exist
+  // Migration: Add duration, started_at, and ended_at columns if they don't exist
   try {
     database.exec(`ALTER TABLE sessions ADD COLUMN duration INTEGER`)
   } catch (err) {
@@ -98,6 +98,12 @@ const ensureSchema = (database: BetterSqliteDatabase) => {
 
   try {
     database.exec(`ALTER TABLE sessions ADD COLUMN started_at INTEGER`)
+  } catch (err) {
+    // Column already exists, ignore
+  }
+
+  try {
+    database.exec(`ALTER TABLE sessions ADD COLUMN ended_at INTEGER`)
   } catch (err) {
     // Column already exists, ignore
   }
@@ -177,13 +183,14 @@ const mapSessionRow = (row: SessionDbRow): SessionRecord => ({
   title: row.title,
   duration: row.duration ?? undefined,
   startedAt: row.started_at ?? undefined,
+  endedAt: row.ended_at ?? undefined,
   createdAt: row.created_at,
 })
 
 const listSessions = (): SessionRecord[] => {
   const database = openDatabase()
   const rows = database
-    .prepare<[], SessionDbRow>('SELECT id, title, duration, started_at, created_at FROM sessions ORDER BY created_at DESC LIMIT 20')
+    .prepare<[], SessionDbRow>('SELECT id, title, duration, started_at, ended_at, created_at FROM sessions ORDER BY created_at DESC LIMIT 20')
     .all()
 
   return rows.map(mapSessionRow)
@@ -281,7 +288,7 @@ const startSession = (sessionId: string): SessionRecord => {
   const now = Date.now()
 
   const existingRow = database
-    .prepare<[string], SessionDbRow>('SELECT id, title, duration, started_at, created_at FROM sessions WHERE id = ?')
+    .prepare<[string], SessionDbRow>('SELECT id, title, duration, started_at, ended_at, created_at FROM sessions WHERE id = ?')
     .get(sessionId)
 
   if (!existingRow) {
@@ -295,6 +302,28 @@ const startSession = (sessionId: string): SessionRecord => {
   return {
     ...mapSessionRow(existingRow),
     startedAt: now,
+  }
+}
+
+const endSession = (sessionId: string): SessionRecord => {
+  const database = openDatabase()
+  const now = Date.now()
+
+  const existingRow = database
+    .prepare<[string], SessionDbRow>('SELECT id, title, duration, started_at, ended_at, created_at FROM sessions WHERE id = ?')
+    .get(sessionId)
+
+  if (!existingRow) {
+    throw new Error('Session not found')
+  }
+
+  database
+    .prepare<[number, string]>('UPDATE sessions SET ended_at = ? WHERE id = ?')
+    .run(now, sessionId)
+
+  return {
+    ...mapSessionRow(existingRow),
+    endedAt: now,
   }
 }
 
@@ -555,6 +584,7 @@ const registerIpcHandlers = () => {
   ipcMain.handle('sanma:get-sessions', () => listSessions())
   ipcMain.handle('sanma:create-session', (_event, payload: { title?: string; duration?: number; agendaItems?: string[] }) => createSession(payload ?? {}))
   ipcMain.handle('sanma:start-session', (_event, payload: { sessionId: string }) => startSession(payload.sessionId))
+  ipcMain.handle('sanma:end-session', (_event, payload: { sessionId: string }) => endSession(payload.sessionId))
 
   ipcMain.handle('sanma:get-agendas', (_event, payload: { sessionId: string }) => listAgendas(payload.sessionId))
   ipcMain.handle('sanma:create-agenda', (_event, payload: { sessionId: string; title: string }) => createAgenda(payload))
