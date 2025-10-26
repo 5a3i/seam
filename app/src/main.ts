@@ -50,7 +50,6 @@ type SummaryDbRow = {
   session_id: string
   content: string
   created_at: number
-  updated_at: number
 }
 
 const resolveDbPath = () => {
@@ -174,10 +173,9 @@ const ensureSchema = (database: BetterSqliteDatabase) => {
   database.exec(`
     CREATE TABLE IF NOT EXISTS summaries (
       id TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL UNIQUE,
+      session_id TEXT NOT NULL,
       content TEXT NOT NULL,
       created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     )
   `)
@@ -521,18 +519,17 @@ const mapSummaryRow = (row: SummaryDbRow): SummaryRecord => ({
   sessionId: row.session_id,
   content: row.content,
   createdAt: row.created_at,
-  updatedAt: row.updated_at,
 })
 
-const getSummary = (sessionId: string): SummaryRecord | null => {
+const getSummaries = (sessionId: string, limit = 100): SummaryRecord[] => {
   const database = openDatabase()
-  const row = database
-    .prepare<[string], SummaryDbRow>(
-      'SELECT id, session_id, content, created_at, updated_at FROM summaries WHERE session_id = ?'
+  const rows = database
+    .prepare<[string, number], SummaryDbRow>(
+      'SELECT id, session_id, content, created_at FROM summaries WHERE session_id = ? ORDER BY created_at ASC LIMIT ?'
     )
-    .get(sessionId)
+    .all(sessionId, limit)
 
-  return row ? mapSummaryRow(row) : null
+  return rows.map(mapSummaryRow)
 }
 
 const saveSummary = (input: { sessionId: string; content: string }): SummaryRecord => {
@@ -540,38 +537,19 @@ const saveSummary = (input: { sessionId: string; content: string }): SummaryReco
   const { sessionId, content } = input
   const now = Date.now()
 
-  // Check if summary already exists
-  const existing = getSummary(sessionId)
+  // Always create new summary (append mode)
+  const id = randomUUID()
+  database
+    .prepare<[string, string, string, number]>(
+      'INSERT INTO summaries (id, session_id, content, created_at) VALUES (?, ?, ?, ?)'
+    )
+    .run(id, sessionId, content, now)
 
-  if (existing) {
-    // Update existing summary
-    database
-      .prepare<[string, number, string]>(
-        'UPDATE summaries SET content = ?, updated_at = ? WHERE session_id = ?'
-      )
-      .run(content, now, sessionId)
-
-    return {
-      ...existing,
-      content,
-      updatedAt: now,
-    }
-  } else {
-    // Create new summary
-    const id = randomUUID()
-    database
-      .prepare<[string, string, string, number, number]>(
-        'INSERT INTO summaries (id, session_id, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
-      )
-      .run(id, sessionId, content, now, now)
-
-    return {
-      id,
-      sessionId,
-      content,
-      createdAt: now,
-      updatedAt: now,
-    }
+  return {
+    id,
+    sessionId,
+    content,
+    createdAt: now,
   }
 }
 
@@ -688,15 +666,13 @@ const generateSummary = async (input: {
   const genAI = new GoogleGenerativeAI(apiKey)
   const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' })
 
-  const prompt = `あなたは会議の議事録作成アシスタントです。以下の会話内容全体を簡潔にまとめてください。
+  const prompt = `以下の会話内容全体を簡潔にまとめてください。
 
 会話内容:
 ${allTranscriptions}
 
 要件:
 - 話し合われた主要なトピックを箇条書きで整理してください
-- 各トピックについて、議論の要点を1〜2文で簡潔にまとめてください
-- 決定事項や合意点があれば明記してください
 - 全体で200〜300字程度にまとめてください
 
 JSON形式ではなく、読みやすい日本語の文章で回答してください。`
@@ -763,7 +739,7 @@ const registerIpcHandlers = () => {
     setSetting(payload.key, payload.value)
   })
 
-  ipcMain.handle('seam:get-summary', (_event, payload: { sessionId: string }) => getSummary(payload.sessionId))
+  ipcMain.handle('seam:get-summaries', (_event, payload: { sessionId: string; limit?: number }) => getSummaries(payload.sessionId, payload.limit))
   ipcMain.handle('seam:save-summary', (_event, payload: { sessionId: string; content: string }) => saveSummary(payload))
 
   ipcMain.handle('seam:transcribe-audio', async (_event, payload: { path: string; locale?: string }) => {

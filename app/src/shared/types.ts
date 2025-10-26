@@ -54,5 +54,4 @@ export type SummaryRecord = {
   sessionId: string
   content: string
   createdAt: number
-  updatedAt: number
 }

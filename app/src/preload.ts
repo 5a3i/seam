@@ -41,8 +41,8 @@ const api = {
     ipcRenderer.invoke('seam:get-setting', payload) as Promise<string | null>,
   setSetting: (payload: { key: string; value: string }) =>
     ipcRenderer.invoke('seam:set-setting', payload) as Promise<void>,
-  getSummary: (payload: { sessionId: string }) =>
-    ipcRenderer.invoke('seam:get-summary', payload) as Promise<SummaryRecord | null>,
+  getSummaries: (payload: { sessionId: string; limit?: number }) =>
+    ipcRenderer.invoke('seam:get-summaries', payload) as Promise<SummaryRecord[]>,
   saveSummary: (payload: { sessionId: string; content: string }) =>
     ipcRenderer.invoke('seam:save-summary', payload) as Promise<SummaryRecord>,
   transcribeAudio: (payload: { data: Uint8Array; mimeType: string; locale?: string }) =>

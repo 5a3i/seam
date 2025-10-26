@@ -1,27 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import {
-  DndContext,
-  closestCenter,
-  KeyboardSensor,
-  PointerSensor,
-  useSensor,
-  useSensors,
-  type DragEndEvent,
-} from '@dnd-kit/core'
-import {
-  arrayMove,
-  SortableContext,
-  sortableKeyboardCoordinates,
-  useSortable,
-  verticalListSortingStrategy,
-} from '@dnd-kit/sortable'
-import { CSS } from '@dnd-kit/utilities'
 import type { SessionRecord, AgendaRecord, TranscriptionResult, SuggestionRecord } from '../shared/types'
 
 export function App() {
   const [sessions, setSessions] = useState<SessionRecord[]>([])
   const [isCreating, setIsCreating] = useState(false)
-  const [showSessionSetup, setShowSessionSetup] = useState(false)
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
   const [view, setView] = useState<'list' | 'setup' | 'detail' | 'settings'>('list')
 
@@ -40,7 +22,10 @@ export function App() {
 
   const handleOpenSessionSetup = useCallback(() => {
     setView('setup')
-    setShowSessionSetup(true)
+  }, [])
+
+  const handleOpenSettings = useCallback(() => {
+    setView('settings')
   }, [])
 
   const handleCreateSession = useCallback(async (title: string, duration: number, agendaItems: string[]) => {
@@ -52,7 +37,6 @@ export function App() {
       setSessions((prev) => [startedSession, ...prev.filter(s => s.id !== session.id)])
       setSelectedSessionId(startedSession.id)
       setView('detail')
-      setShowSessionSetup(false)
     } catch (err) {
       console.error('[seam] failed to create session', err)
     } finally {
@@ -71,10 +55,6 @@ export function App() {
     void loadSessions()
   }, [loadSessions])
 
-  const handleOpenSettings = useCallback(() => {
-    setView('settings')
-  }, [])
-
   // Show settings screen
   if (view === 'settings') {
     return (
@@ -88,10 +68,6 @@ export function App() {
   if (view === 'setup') {
     return (
       <SessionSetupModal
-        onClose={() => {
-          setShowSessionSetup(false)
-          setView('list')
-        }}
         onCreate={handleCreateSession}
         isCreating={isCreating}
       />
@@ -118,6 +94,7 @@ export function App() {
         sessions={sessions}
         onSelectSession={handleSelectSession}
         onCreateNew={handleOpenSessionSetup}
+        onOpenSettings={handleOpenSettings}
       />
     )
   }
@@ -164,12 +141,7 @@ export function App() {
       <div className="flex flex-1 overflow-hidden">
         {/* Left Sidebar - Agenda */}
         <aside className="w-80 border-r border-slate-800 bg-slate-900/50 overflow-y-auto">
-          <AgendaPanel
-            session={selectedSession}
-            onTriggerAISummary={() => {
-              window.dispatchEvent(new CustomEvent('trigger-ai-summary'))
-            }}
-          />
+          <AgendaPanel session={selectedSession} />
         </aside>
 
         {/* Center - Live Transcription */}
@@ -315,10 +287,9 @@ function SessionListScreen({ sessions, onSelectSession, onCreateNew, onOpenSetti
 
 type AgendaPanelProps = {
   session?: SessionRecord
-  onTriggerAISummary?: () => void
 }
 
-function AgendaPanel({ session, onTriggerAISummary }: AgendaPanelProps) {
+function AgendaPanel({ session }: AgendaPanelProps) {
   const sessionId = session?.id
   const [agendas, setAgendas] = useState<AgendaRecord[]>([])
   const [isLoading, setIsLoading] = useState(false)
@@ -401,7 +372,6 @@ type SuggestionPanelProps = {
 
 function SuggestionPanel({ sessionId }: SuggestionPanelProps) {
   const [suggestions, setSuggestions] = useState<SuggestionRecord[]>([])
-  const [isLoading, setIsLoading] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -412,15 +382,12 @@ function SuggestionPanel({ sessionId }: SuggestionPanelProps) {
     }
 
     try {
-      setIsLoading(true)
       setError(null)
       const records = await window.seam.getSuggestions({ sessionId, limit: 5 })
       setSuggestions(records)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       console.error('[seam] failed to load suggestions', err)
-    } finally {
-      setIsLoading(false)
     }
   }, [sessionId])
 
@@ -594,36 +561,27 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
   const [transcription, setTranscription] = useState<TranscriptionResult | null>(null)
   const [transcriptionError, setTranscriptionError] = useState<string | null>(null)
   const [continuousMode, setContinuousMode] = useState(false)
-  const [chunkCount, setChunkCount] = useState(0)
-  const [summary, setSummary] = useState<string>('')
-  const [summaryUpdatedAt, setSummaryUpdatedAt] = useState<number | null>(null)
+  const [summaries, setSummaries] = useState<SummaryRecord[]>([])
   const [isSummaryGenerating, setIsSummaryGenerating] = useState(false)
   const summaryTimerRef = useRef<number | null>(null)
 
-  // Load existing summary when component mounts or sessionId changes
+  // Load existing summaries when component mounts or sessionId changes
   useEffect(() => {
-    const loadSummary = async () => {
+    const loadSummaries = async () => {
       if (!sessionId) {
-        setSummary('')
-        setSummaryUpdatedAt(null)
+        setSummaries([])
         return
       }
 
       try {
-        const summaryRecord = await window.seam.getSummary({ sessionId })
-        if (summaryRecord) {
-          setSummary(summaryRecord.content)
-          setSummaryUpdatedAt(summaryRecord.updatedAt)
-        } else {
-          setSummary('')
-          setSummaryUpdatedAt(null)
-        }
+        const summaryRecords = await window.seam.getSummaries({ sessionId })
+        setSummaries(summaryRecords)
       } catch (error) {
-        console.error('[seam] Failed to load summary:', error)
+        console.error('[seam] Failed to load summaries:', error)
       }
     }
 
-    void loadSummary()
+    void loadSummaries()
   }, [sessionId])
 
   const generateAndUpdateSummary = useCallback(async () => {
@@ -631,9 +589,11 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
 
     try {
       setIsSummaryGenerating(true)
-      const newSummary = await window.seam.generateSummary({ sessionId })
-      setSummary(newSummary)
-      setSummaryUpdatedAt(Date.now())
+      const newSummaryText = await window.seam.generateSummary({ sessionId })
+      // The summary is already saved in the database by generateSummary
+      // Reload all summaries to get the updated list
+      const updatedSummaries = await window.seam.getSummaries({ sessionId })
+      setSummaries(updatedSummaries)
     } catch (error) {
       console.error('[seam] Failed to generate summary:', error)
     } finally {
@@ -797,7 +757,6 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
       // Minimum 25KB for 10-second chunks
       if (blob.size >= 25000) {
         console.log(`[sanma] Continuous cycle complete, size: ${(blob.size / 1024).toFixed(1)}KB`)
-        setChunkCount((prev) => prev + 1)
         void transcribeChunk(blob)
       } else {
         console.log(`[sanma] Skipping small recording: ${(blob.size / 1024).toFixed(1)}KB`)
@@ -840,7 +799,6 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
     setTranscription(null)
     setTranscriptionError(null)
     setTranscriptionStatus('idle')
-    setChunkCount(0)
 
     try {
       setStatus('initializing')
@@ -988,13 +946,6 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
       <div className="flex-1 space-y-6 overflow-y-auto">
         {/* Current Speech Section */}
         <div className="space-y-3">
-          <div className="flex items-center gap-2 text-sm font-medium text-slate-300">
-            <svg className="h-4 w-4 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-            </svg>
-            現在の発言
-          </div>
-
           {transcription && (
             <div className="rounded-lg bg-blue-500/10 border border-blue-500/30 px-4 py-3 space-y-2">
               <div className="text-xs text-blue-300">
@@ -1024,25 +975,31 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
             <svg className="h-4 w-4 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
             </svg>
-            これまでのサマリ
+            これまでのサマリ {summaries.length > 0 && `(${summaries.length}件)`}
             {isSummaryGenerating && (
               <div className="h-3 w-3 animate-spin rounded-full border-2 border-green-400 border-t-transparent ml-2" />
             )}
           </div>
 
-          <div className="rounded-lg bg-slate-800/40 px-4 py-3">
-            {summary ? (
-              <p className="text-sm leading-relaxed text-slate-300 whitespace-pre-wrap">{summary}</p>
-            ) : (
+          {summaries.length > 0 ? (
+            <div className="space-y-2">
+              {summaries.map((summary, index) => (
+                <div key={summary.id} className="rounded-lg bg-green-900/20 border border-green-800/30 px-4 py-3">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-xs font-medium text-green-400">#{index + 1}</span>
+                    <span className="text-xs text-slate-500">
+                      {new Date(summary.createdAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                    </span>
+                  </div>
+                  <p className="text-sm leading-relaxed text-slate-300 whitespace-pre-wrap">{summary.content}</p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="rounded-lg bg-slate-800/40 px-4 py-3">
               <p className="text-sm leading-relaxed text-slate-400 italic">
                 {isSummaryGenerating ? 'サマリを生成中...' : '録音を開始すると、30秒ごとに会話内容がサマライズされます。'}
               </p>
-            )}
-          </div>
-
-          {summaryUpdatedAt && (
-            <div className="text-xs text-slate-500">
-              最終更新: {new Date(summaryUpdatedAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
             </div>
           )}
         </div>
@@ -1229,14 +1186,13 @@ function SettingsScreen({ onClose }: SettingsScreenProps) {
 }
 
 type SessionSetupModalProps = {
-  onClose: () => void
   onCreate: (title: string, duration: number, agendaItems: string[]) => void
   isCreating: boolean
 }
 
-function SessionSetupModal({ onClose, onCreate, isCreating }: SessionSetupModalProps) {
+function SessionSetupModal({ onCreate, isCreating }: SessionSetupModalProps) {
   const [title, setTitle] = useState('')
-  const [duration, setDuration] = useState(60) // Default 60 minutes
+  const [duration] = useState(60) // Default 60 minutes
   const [agendaItems, setAgendaItems] = useState<string[]>([])
   const [newAgendaItem, setNewAgendaItem] = useState('')
 
