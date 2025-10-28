@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { SessionRecord, AgendaRecord, TranscriptionResult, SuggestionRecord } from '../shared/types'
+import type { SessionRecord, AgendaRecord, TranscriptionResult, SuggestionRecord, SummaryRecord } from '../shared/types'
 
 export function App() {
   const [sessions, setSessions] = useState<SessionRecord[]>([])
@@ -589,7 +589,7 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
 
     try {
       setIsSummaryGenerating(true)
-      const newSummaryText = await window.seam.generateSummary({ sessionId })
+      // const newSummaryText = await window.seam.generateSummary({ sessionId })
       // The summary is already saved in the database by generateSummary
       // Reload all summaries to get the updated list
       const updatedSummaries = await window.seam.getSummaries({ sessionId })
