@@ -29,4 +29,8 @@ export default defineConfig({
       '@renderer': resolve(__dirname, 'src/renderer'),
     },
   },
+  test: {
+    environment: 'node',
+    include: ['src/main/**/*.test.ts'],
+  },
 })
