@@ -6,6 +6,7 @@ export function App() {
   const [isCreating, setIsCreating] = useState(false)
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
   const [view, setView] = useState<'list' | 'setup' | 'detail' | 'settings'>('list')
+  const [isStartingSession, setIsStartingSession] = useState(false)
 
   const loadSessions = useCallback(async () => {
     try {
@@ -32,10 +33,8 @@ export function App() {
     try {
       setIsCreating(true)
       const session = await window.seam.createSession({ title, duration, agendaItems })
-      // Start the session immediately
-      const startedSession = await window.seam.startSession({ sessionId: session.id })
-      setSessions((prev) => [startedSession, ...prev.filter(s => s.id !== session.id)])
-      setSelectedSessionId(startedSession.id)
+      setSessions((prev) => [session, ...prev.filter((s) => s.id !== session.id)])
+      setSelectedSessionId(session.id)
       setView('detail')
     } catch (err) {
       console.error('[seam] failed to create session', err)
@@ -54,6 +53,20 @@ export function App() {
     setSelectedSessionId(null)
     void loadSessions()
   }, [loadSessions])
+
+  const handleStartSession = useCallback(async (sessionId: string) => {
+    try {
+      setIsStartingSession(true)
+      const started = await window.seam.startSession({ sessionId })
+      setSessions((prev) =>
+        prev.map((session) => (session.id === sessionId ? started : session))
+      )
+    } catch (err) {
+      console.error('[seam] failed to start session', err)
+    } finally {
+      setIsStartingSession(false)
+    }
+  }, [])
 
   // Show settings screen
   if (view === 'settings') {
@@ -128,18 +141,35 @@ export function App() {
             durationMinutes={selectedSession.duration}
           />
         </div>
-        <button
-          type="button"
-          onClick={async () => {
-            if (selectedSession.id) {
-              await window.seam.endSession({ sessionId: selectedSession.id })
-              handleBackToList()
-            }
-          }}
-          className="rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium text-slate-200 transition hover:bg-slate-700"
-        >
-          セッション終了
-        </button>
+        <div className="flex items-center gap-3">
+          {!selectedSession.startedAt && !selectedSession.endedAt && (
+            <button
+              type="button"
+              onClick={() => {
+                if (selectedSession.id) {
+                  void handleStartSession(selectedSession.id)
+                }
+              }}
+              disabled={isStartingSession}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {isStartingSession ? '開始中...' : 'セッション開始'}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={async () => {
+              if (selectedSession.id) {
+                await window.seam.endSession({ sessionId: selectedSession.id })
+                handleBackToList()
+              }
+            }}
+            disabled={!selectedSession.startedAt || !!selectedSession.endedAt}
+            className="rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium text-slate-200 transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            セッション終了
+          </button>
+        </div>
       </header>
 
       {/* Main 3-Column Layout */}
@@ -196,7 +226,28 @@ function SessionTimer({ startedAt, endedAt, durationMinutes }: SessionTimerProps
   }, [startedAt, durationMinutes, endedAt])
 
   if (!startedAt || !durationMinutes || durationMinutes <= 0) {
-    return null
+    if (!durationMinutes || durationMinutes <= 0) {
+      return null
+    }
+
+    return (
+      <div className="flex flex-col items-start gap-1 text-xs font-medium">
+        <div className="flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-800/80 px-3 py-1.5 text-slate-200">
+          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={1.5}
+              d="M12 6v6l3 3m5-3a8 8 0 11-16 0 8 8 0 0116 0z"
+            />
+          </svg>
+          <span>未開始</span>
+        </div>
+        <span className="text-[10px] uppercase tracking-wide text-slate-500">
+          全体 {durationMinutes}分
+        </span>
+      </div>
+    )
   }
 
   const durationMs = durationMinutes * 60_000
