@@ -32,6 +32,16 @@ let package = Package(
                 .linkedFramework("Speech"),
                 .linkedFramework("AVFoundation")
             ]
+        ),
+        .testTarget(
+            name: "SpeechTests",
+            dependencies: ["speech"],
+            resources: [
+                .copy("Fixtures")
+            ],
+            linkerSettings: [
+                .linkedFramework("XCTest", .when(platforms: [.macOS]))
+            ]
         )
     ]
 )
