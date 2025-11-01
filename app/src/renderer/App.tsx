@@ -122,6 +122,11 @@ export function App() {
               second: '2-digit',
             })}
           </span>
+          <SessionTimer
+            startedAt={selectedSession.startedAt}
+            endedAt={selectedSession.endedAt}
+            durationMinutes={selectedSession.duration}
+          />
         </div>
         <button
           type="button"
@@ -163,6 +168,92 @@ type SessionListScreenProps = {
   onSelectSession: (sessionId: string) => void
   onCreateNew: () => void
   onOpenSettings: () => void
+}
+
+type SessionTimerProps = {
+  startedAt?: number
+  endedAt?: number
+  durationMinutes?: number
+}
+
+function SessionTimer({ startedAt, endedAt, durationMinutes }: SessionTimerProps) {
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    if (!startedAt || !durationMinutes) return
+    if (endedAt) {
+      setNow(endedAt)
+      return
+    }
+
+    const id = window.setInterval(() => {
+      setNow(Date.now())
+    }, 1000)
+
+    return () => {
+      window.clearInterval(id)
+    }
+  }, [startedAt, durationMinutes, endedAt])
+
+  if (!startedAt || !durationMinutes || durationMinutes <= 0) {
+    return null
+  }
+
+  const durationMs = durationMinutes * 60_000
+  const referenceTime = endedAt ?? now
+  const endTime = startedAt + durationMs
+
+  const elapsedMs = Math.max(0, referenceTime - startedAt)
+  const remainingMs = endTime - referenceTime
+  const isOver = remainingMs < 0
+  const absRemaining = Math.abs(remainingMs)
+  const totalSeconds = Math.floor(absRemaining / 1000)
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  const formatted = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+
+  const progressRatio = durationMs === 0 ? 0 : Math.min(1, Math.max(0, elapsedMs / durationMs))
+  const barWidth = isOver ? 100 : progressRatio * 100
+
+  const statusLabel = endedAt
+    ? isOver
+      ? '終了 (超過)'
+      : '終了 (残り)'
+    : isOver
+      ? '超過'
+      : '残り'
+
+  return (
+    <div className="flex flex-col items-start gap-1 text-xs font-medium">
+      <div
+        className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 ${
+          isOver
+            ? 'border-rose-500 bg-rose-500/10 text-rose-100'
+            : 'border-emerald-500 bg-emerald-500/10 text-emerald-100'
+        }`}
+      >
+        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={1.5}
+            d="M12 6v6l3 3m5-3a8 8 0 11-16 0 8 8 0 0116 0z"
+          />
+        </svg>
+        <span>{statusLabel}</span>
+        <span className="text-sm font-semibold tracking-widest text-white">{formatted}</span>
+      </div>
+      <div className="h-1.5 w-32 overflow-hidden rounded-full bg-slate-800">
+        <div
+          className={`${isOver ? 'bg-rose-500' : 'bg-emerald-500'} h-full transition-[width] duration-500`}
+          style={{ width: `${barWidth}%` }}
+        />
+      </div>
+      <span className="text-[10px] uppercase tracking-wide text-slate-500">
+        全体 {durationMinutes}分
+      </span>
+    </div>
+  )
 }
 
 function SessionListScreen({ sessions, onSelectSession, onCreateNew, onOpenSettings }: SessionListScreenProps) {
@@ -1192,7 +1283,7 @@ type SessionSetupModalProps = {
 
 function SessionSetupModal({ onCreate, isCreating }: SessionSetupModalProps) {
   const [title, setTitle] = useState('')
-  const [duration] = useState(60) // Default 60 minutes
+  const [duration, setDuration] = useState(20) // Default 20 minutes session
   const [agendaItems, setAgendaItems] = useState<string[]>([])
   const [newAgendaItem, setNewAgendaItem] = useState('')
 
@@ -1208,7 +1299,7 @@ function SessionSetupModal({ onCreate, isCreating }: SessionSetupModalProps) {
   }
 
   const handleSubmit = () => {
-    if (title.trim() && agendaItems.length > 0) {
+    if (title.trim() && agendaItems.length > 0 && duration > 0) {
       onCreate(title.trim(), duration, agendaItems)
     }
   }
@@ -1232,6 +1323,36 @@ function SessionSetupModal({ onCreate, isCreating }: SessionSetupModalProps) {
             placeholder="例: プロダクト開発ディスカッション 2025-10"
             className="w-full rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
           />
+        </div>
+
+        {/* Session Duration */}
+        <div className="space-y-3">
+          <label className="block text-sm font-medium text-gray-700">セッションの所要時間 (分)</label>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setDuration((prev) => Math.max(5, prev - 5))}
+              className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:bg-gray-50"
+            >
+              -5
+            </button>
+            <input
+              type="number"
+              min={5}
+              step={5}
+              value={duration}
+              onChange={(e) => setDuration(Math.max(5, Number(e.target.value) || 5))}
+              className="w-32 rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-center text-sm font-semibold text-gray-900 focus:border-blue-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+            />
+            <button
+              type="button"
+              onClick={() => setDuration((prev) => Math.min(180, prev + 5))}
+              className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:bg-gray-50"
+            >
+              +5
+            </button>
+            <span className="text-xs text-gray-500">5〜180分の範囲で設定できます</span>
+          </div>
         </div>
 
         {/* Agenda List */}
@@ -1301,4 +1422,3 @@ function SessionSetupModal({ onCreate, isCreating }: SessionSetupModalProps) {
     </div>
   )
 }
-
