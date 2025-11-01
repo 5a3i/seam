@@ -1,5 +1,6 @@
 import Foundation
 import Speech
+import Atomics
 
 // MARK: - Configuration
 
@@ -125,10 +126,11 @@ private func run(config: AppConfig) throws {
 
     // Wait on a background queue to keep the main RunLoop running
     let waitQueue = DispatchQueue.global(qos: .userInitiated)
-    var timeoutResult: DispatchTimeoutResult = .success
+    let timedOut = ManagedAtomic(false)
 
     waitQueue.async {
-        timeoutResult = semaphore.wait(timeout: .now() + config.timeout)
+        let waitResult = semaphore.wait(timeout: .now() + config.timeout)
+        timedOut.store(waitResult == .timedOut, ordering: .relaxed)
         // Stop the RunLoop after timeout or completion
         CFRunLoopStop(CFRunLoopGetMain())
     }
@@ -139,8 +141,10 @@ private func run(config: AppConfig) throws {
     task.cancel()
     fputs("[speech] Task cancelled, hasReceivedAnyResult: \(hasReceivedAnyResult)\n", stderr)
 
-    if timeoutResult == .timedOut {
-        if hasReceivedAnyResult, let result = finalResult {
+    let didTimeOut = timedOut.load(ordering: .relaxed)
+
+    if didTimeOut {
+        if hasReceivedAnyResult {
             fputs("[speech] Timed out but using partial result\n", stderr)
             // Use the partial result if we got something
         } else {

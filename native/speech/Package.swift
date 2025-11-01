@@ -15,10 +15,15 @@ let package = Package(
     products: [
         .executable(name: "speech", targets: ["speech"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-atomics", from: "1.2.0")
+    ],
     targets: [
         .executableTarget(
             name: "speech",
-            dependencies: [],
+            dependencies: [
+                .product(name: "Atomics", package: "swift-atomics")
+            ],
             exclude: ["Info.plist"],
             swiftSettings: [
                 .unsafeFlags([
