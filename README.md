@@ -1,90 +1,90 @@
 # Seam
 
-Seam (codename: "Sanma Codex") is a macOS desktop assistant for panel moderators. It captures the conversation from the microphone, turns it into a structured transcript, and uses Gemini to suggest the next talking points on demand. The project combines an Electron + React front end, a TypeScript main process backed by SQLite, and a Swift command line tool that wraps the Apple Speech framework for high-quality local transcription.
+Seam は、パネルディスカッションやミーティングのモデレーターを支援する macOS デスクトップアプリです。マイク入力を文字起こしし、議論の流れに合わせた要約や次の質問案を Gemini で生成します。Electron + React の UI と、SQLite を扱う TypeScript 製メインプロセス、Apple Speech Framework を呼び出す Swift 製 CLI を同梱したハイブリッド構成になっています。
 
-## Highlights
-- **Session-driven workflow:** Create, start, and close sessions with automatic agenda scaffolding and a searchable history capped at the latest 20 records.
-- **Agenda orchestration:** Plan the run-of-show ahead of time, drag to reorder items, and mark their state (`pending`, `current`, `completed`) while the AI prompt stays aware of the current and next topics.
-- **Live transcription pipeline:** The renderer captures audio with `MediaRecorder`, the main process persists each chunk, and the bundled Swift CLI (`native/speech`) performs on-device recognition through `SFSpeechRecognizer`, returning rich metadata (confidence, segments, timestamps).
-- **On-demand AI guidance:** A keyboard shortcut, UI button, or voice trigger can ask Gemini 2.5 Flash for a 100–160 character digest, a bridging phrase, and two follow-up questions. Results are stored so the last five suggestions can be revisited instantly.
-- **Concise recaps:** Facilitators can generate rolling summaries that remain in the database for later review or export.
-- **Single-file persistence:** All sessions, agendas, transcripts, suggestions, summaries, and settings live inside `seam.db` under the Electron `userData` directory (for macOS: `~/Library/Application Support/Seam`).
+## 特徴
+- **セッション管理**: セッションの作成・開始・終了を行い、最新 20 件まで履歴を保持。
+- **アジェンダ運用**: 事前に並べ替え可能なアジェンダを用意し、状態（`pending` / `current` / `completed`）を切り替えながら進行。
+- **ライブ文字起こし**: レンダラで `MediaRecorder` により音声を収集し、Swift CLI（`native/speech`）経由で `SFSpeechRecognizer` を利用したオンデバイス認識を実施。信頼度やタイムスタンプも取得します。
+- **オンデマンド提案**: ボタン、ショートカット、声かけで Gemini 2.5 Flash にリクエストし、100〜160 字の要約とブリッジングフレーズ、フォローアップ質問 2 件を生成。直近 5 件の履歴を参照できます。
+- **サマリー蓄積**: 任意タイミングで議論全体の要約を生成し、DB に保存して振り返りに活用。
+- **単一 DB 保存**: セッション、アジェンダ、転記、提案、サマリー、設定はすべて `seam.db` に保存され、macOS では `~/Library/Application Support/Seam` に配置されます。
 
-## Project Layout
+## フォルダ構成
 ```
-app/                 Electron + React code, Vite based
-  src/main.ts        Main process: IPC, SQLite access, speech + Gemini bridges
-  src/renderer/      React UI (session list, agenda, microphone, AI panels)
-  src/preload.ts     IPC surface exposed to the renderer (`window.seam`)
-  src/shared/        Shared TypeScript models
-  dist-*/            Build outputs (ignored by git in normal workflows)
-native/speech/       Swift Package that wraps Apple Speech for offline STT
-build_*.sh           One-touch scripts for packaging the macOS bundle
-docs/                PRD, design tasks, and reference screenshots
+app/                 Electron + React（Vite ベース）
+  src/main.ts        メインプロセス: IPC、SQLite、音声認識と Gemini 連携
+  src/renderer/      React UI（セッション一覧・アジェンダ・録音・AI パネル）
+  src/preload.ts     レンダラへ公開する IPC API (`window.seam`)
+  src/shared/        共有 TypeScript 型
+  dist-*/            ビルド産物（通常は git 管理外）
+native/speech/       Apple Speech をラップした Swift Package
+build_*.sh           macOS アプリを組み立てるスクリプト
+docs/                PRD、設計タスク、スクリーンショット
 ```
 
-## Prerequisites
-- macOS 13+ (Apple Speech on-device recognition is preferred; earlier versions fall back to cloud recognition).
-- Xcode Command Line Tools (for Swift and codesign).
-- Node.js 20+ and npm (Electron + Vite toolchain).
-- A Google Gemini API key (`makersuite.google.com/app/apikey`).
+## 必要環境
+- macOS 13 以上（オンデバイス認識を推奨。13 未満ではクラウド認識にフォールバック）
+- Xcode Command Line Tools（Swift と codesign に必要）
+- Node.js 20 以上と npm（Electron + Vite のツールチェーン）
+- Google Gemini API キー（取得先: https://makersuite.google.com/app/apikey）
 
-## First-time Setup
-1. **Install JavaScript dependencies**:
+## 初期セットアップ
+1. **JavaScript 依存関係のインストール**
    ```bash
    cd app
    npm install
    ```
-2. **Build the speech binary** (debug build used in development):
+2. **音声認識バイナリのビルド**（開発ではデバッグビルドを使用）
    ```bash
    cd ../native/speech
    swift build
    ```
-   This produces `.build/debug/speech`, which the Electron main process invokes. You can override the location with `SEAM_SPEECH_BIN` if needed.
-3. **Expose your Gemini key**:
-   - Either set `GOOGLE_API_KEY` before starting the app, or
-   - Enter the key inside the in-app settings panel (it is stored in the local `settings` table under `gemini_api_key`).
+   これにより `.build/debug/speech` が生成され、メインプロセスから呼び出されます。別パスを使いたい場合は環境変数 `SEAM_SPEECH_BIN` を設定してください。
+3. **Gemini キーの登録**
+   - アプリ起動前に `GOOGLE_API_KEY` を環境変数として設定する、または
+   - アプリ内の設定画面にキーを入力します（`settings` テーブルに `gemini_api_key` として保存）。
 
-## Development Workflow
+## 開発フロー
 ```bash
 cd app
 npm run dev
 ```
-The Vite + `vite-plugin-electron` setup launches the renderer and spawns Electron with hot reload for both the UI and the main process. The transcript database is created automatically on first run, seeded with an example session.
+Vite + `vite-plugin-electron` により、レンダラとメインプロセスの両方でホットリロードが有効になります。初回起動時にサンプルセッション付きで DB が自動生成されます。
 
-### Optional Settings
-- `SEAM_SPEECH_BIN`: Path to a prebuilt `speech` executable (useful when running from a packaged bundle or a custom build configuration).
-- `GOOGLE_API_KEY`: Default Gemini key if you do not want to use the settings UI.
+### オプション設定
+- `SEAM_SPEECH_BIN`: 任意の `speech` 実行ファイルへのパスを指定。
+- `GOOGLE_API_KEY`: 設定画面を使わずに Gemini キーを注入したいときに利用。
 
-## Packaging for macOS
-`electron-builder` is configured in `app/package.json`. For a reproducible bundle that also includes the Swift binary, run:
+## macOS 向けパッケージング
+`app/package.json` には `electron-builder` の設定が含まれています。Swift バイナリ込みで再現性のあるバンドルを生成するには、プロジェクトルートで以下を実行します。
 ```bash
 ./build_electron_app.sh
 ```
-The script compiles the Swift target in release mode, builds the Electron app, stitches the bundle together at `release/Sanma Codex.app`, and applies an ad-hoc code signature. See `README_SHARING.md` for distribution tips, including DMG creation.
+このスクリプトは Swift をリリースビルドし、Electron アプリをビルドして `release/Sanma Codex.app` を組み立て、アドホック署名を付与します。DMG 化などの配布方法は `README_SHARING.md` を参照してください。
 
-## Data Model at a Glance
-| Table | Purpose |
-| ----- | ------- |
-| `sessions` | Session metadata, start/end timestamps, duration. |
-| `agendas` | Ordered agenda items with status tracking per session. |
-| `transcriptions` | Persisted STT chunks with locale + confidence. |
-| `suggestions` | Gemini outputs (summary, bridge, follow-up questions). |
-| `summaries` | Long-form recaps generated on demand. |
-| `settings` | Local key/value store (currently the Gemini API key). |
+## データモデル概要
+| テーブル | 役割 |
+| -------- | ---- |
+| `sessions` | セッション情報（タイトル、開始／終了時刻、所要時間）。 |
+| `agendas` | セッション単位のアジェンダ項目と順序、状態管理。 |
+| `transcriptions` | 文字起こし結果（テキスト、言語、信頼度、作成時刻）。 |
+| `suggestions` | Gemini の提案（要約・ブリッジング・フォローアップ）。 |
+| `summaries` | 任意タイミングで生成された議事サマリー。 |
+| `settings` | ローカル設定ストア（現在は Gemini API キーのみ）。 |
 
-## Key Flows
-- **Transcription**: The renderer buffers audio chunks (defaulting to AAC/WebM). Once a chunk exceeds 50 KB, it streams the bytes to the main process, which writes a temporary file and calls the Swift `speech` binary. Parsed results are shown immediately and appended to `transcriptions`.
-- **Suggestion generation**: When requested, the main process fetches up to the last three minutes of transcript text, injects the current/next agenda titles, and prompts Gemini 2.5 Flash. The JSON response is validated, stored, and surfaced in the UI history carousel.
-- **Summaries**: Facilitators can generate rolling summaries. Each response is saved so repeated requests provide an auditable trail of what was discussed.
+## 主要フロー
+- **文字起こし**: レンダラが一定サイズ（50KB 以上）の音声チャンクをメインプロセスへ送信 → 一時ファイルとして保存 → Swift 製 `speech` バイナリを実行 → 結果を UI 表示と DB 保存。
+- **提案生成**: 直近 3 分の文字起こしとアジェンダの現在／次項目をまとめて Gemini 2.5 Flash に投げ、JSON 形式の応答を検証後に保存・表示。
+- **サマリー生成**: セッション全体、または指定期間を対象に Gemini に要約を生成させ、継続的な記録として `summaries` に追加。
 
-## Additional Resources
-- `docs/prd.md`: Product requirements draft, target users, and success criteria.
-- `docs/task.md`: Implementation log with phased milestones.
-- `README_SHARING.md`: How to package and share the `.app` or a DMG build.
-- `CHANGELOG.md`: Release notes for v1.0.x.
+## 参考資料
+- `docs/prd.md`: プロダクト要求仕様書とターゲット定義。
+- `docs/task.md`: 実装タスクとマイルストーンの記録。
+- `README_SHARING.md`: `.app` または DMG の配布手順。
+- `CHANGELOG.md`: v1.0 系の更新履歴。
 
-## Roadmap Ideas
-- Wire up the voice trigger phrases described in the PRD to auto-request suggestions.
-- Add automated tests around the agenda reorder IPC handlers and AI prompt assembly.
-- Expand the settings store to hold multiple API providers and privacy toggles.
+## 今後のアイデア
+- PRD で記載した音声トリガーと提案リクエストの連携を実装。
+- アジェンダ並べ替えやプロンプト生成の IPC ハンドラに対する自動テスト追加。
+- 設定ストアを拡張し、複数の AI プロバイダやプライバシー設定を扱えるようにする。
