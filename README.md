@@ -48,8 +48,7 @@ docs/                PRD、設計タスク、スクリーンショット
    ```
    これにより `.build/debug/speech` が生成され、メインプロセスから呼び出されます。別パスを使いたい場合は環境変数 `SEAM_SPEECH_BIN` を設定してください。
 3. **Gemini キーの登録**
-   - アプリ起動前に `GOOGLE_API_KEY` を環境変数として設定する、または
-   - アプリ内の設定画面にキーを入力します（`settings` テーブルに `gemini_api_key` として保存）。
+   - アプリ内の設定画面に API キーを入力します（`settings` テーブルに `gemini_api_key` として保存）。
 
 ## 開発フロー
 ```bash
@@ -60,7 +59,6 @@ Vite + `vite-plugin-electron` により、レンダラとメインプロセス�
 
 ### オプション設定
 - `SEAM_SPEECH_BIN`: 任意の `speech` 実行ファイルへのパスを指定。
-- `GOOGLE_API_KEY`: 設定画面を使わずに Gemini キーを注入したいときに利用。
 
 ## macOS 向けパッケージング
 `app/package.json` には `electron-builder` の設定が含まれています。Swift バイナリ込みで再現性のあるバンドルを生成するには、プロジェクトルートで以下を実行します。

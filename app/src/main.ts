@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import { transcribeAudioFile, normalizeToBuffer, extensionFromMime } from './main/transcription'
-import type { SessionRecord, AgendaRecord, TranscriptionResult, SuggestionRecord, TranscriptionRecord, SummaryRecord } from './shared/types'
+import type { SessionRecord, AgendaRecord, SuggestionRecord, TranscriptionRecord, SummaryRecord } from './shared/types'
 import type { Database as BetterSqliteDatabase } from 'better-sqlite3'
 
 const require = createRequire(import.meta.url)
@@ -558,8 +558,8 @@ const generateAiSuggestion = async (input: {
   currentAgendaTitle?: string
   nextAgendaTitle?: string
 }): Promise<SuggestionRecord> => {
-  // Try to get API key from database first, fall back to environment variable
-  const apiKey = getSetting('gemini_api_key') ?? process.env.GOOGLE_API_KEY
+  // Gemini APIキーは設定ストアに保存されたものを使用する
+  const apiKey = getSetting('gemini_api_key')
 
   if (!apiKey) {
     throw new Error('Gemini API key is not configured. Please set it in Settings.')
@@ -640,8 +640,8 @@ const generateSummary = async (input: {
   sessionId: string
   secondsAgo?: number
 }): Promise<string> => {
-  // Try to get API key from database first, fall back to environment variable
-  const apiKey = getSetting('gemini_api_key') ?? process.env.GOOGLE_API_KEY
+  // Gemini APIキーは設定ストアに保存されたものを使用する
+  const apiKey = getSetting('gemini_api_key')
 
   if (!apiKey) {
     throw new Error('Gemini API key is not configured. Please set it in Settings.')
