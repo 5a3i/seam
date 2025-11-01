@@ -59,7 +59,7 @@ struct SpeechCLISuite {
         #expect(payload.locale == "ja-JP")
         #expect(payload.confidence > 0.0)
         #expect(!payload.segments.isEmpty)
-        #expect(payload.text.contains("テスト"), "Recognized text should contain 'テスト'. Actual: \(payload.text)")
+        #expect(payload.text.contains("音声認識テスト"), "Recognized text should contain '音声認識テスト'. Actual: \(payload.text)")
         #expect(!payload.text.isEmpty)
         #expect(payload.audioPath.hasSuffix("ja_sample.m4a"))
     }

@@ -38,9 +38,6 @@ let package = Package(
             dependencies: ["speech"],
             resources: [
                 .copy("Fixtures")
-            ],
-            linkerSettings: [
-                .linkedFramework("XCTest", .when(platforms: [.macOS]))
             ]
         )
     ]
