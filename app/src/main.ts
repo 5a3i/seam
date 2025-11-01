@@ -8,7 +8,14 @@ import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import { transcribeAudioFile, normalizeToBuffer, extensionFromMime } from './main/transcription'
-import type { SessionRecord, AgendaRecord, SuggestionRecord, TranscriptionRecord, SummaryRecord } from './shared/types'
+import type {
+  SessionRecord,
+  AgendaRecord,
+  SuggestionRecord,
+  TranscriptionRecord,
+  SummaryRecord,
+  ConfirmationRecord,
+} from './shared/types'
 import type { Database as BetterSqliteDatabase } from 'better-sqlite3'
 
 const require = createRequire(import.meta.url)
@@ -50,6 +57,15 @@ type SummaryDbRow = {
   session_id: string
   content: string
   created_at: number
+}
+type ConfirmationDbRow = {
+  id: string
+  session_id: string
+  title: string
+  status: string
+  summary: string | null
+  created_at: number
+  completed_at: number | null
 }
 
 const resolveDbPath = () => {
@@ -182,6 +198,23 @@ const ensureSchema = (database: BetterSqliteDatabase) => {
 
   database.exec(`
     CREATE INDEX IF NOT EXISTS idx_summaries_session ON summaries(session_id)
+  `)
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS confirmations (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      summary TEXT,
+      created_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    )
+  `)
+
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_confirmations_session ON confirmations(session_id, created_at)
   `)
 }
 
@@ -553,6 +586,112 @@ const saveSummary = (input: { sessionId: string; content: string }): SummaryReco
   }
 }
 
+const mapConfirmationRow = (row: ConfirmationDbRow): ConfirmationRecord => ({
+  id: row.id,
+  sessionId: row.session_id,
+  title: row.title,
+  status: (row.status as 'pending' | 'completed') ?? 'pending',
+  summary: row.summary ?? undefined,
+  createdAt: row.created_at,
+  completedAt: row.completed_at ?? undefined,
+})
+
+const listConfirmations = (sessionId: string): ConfirmationRecord[] => {
+  const database = openDatabase()
+  const rows = database
+    .prepare<[string], ConfirmationDbRow>(
+      'SELECT id, session_id, title, status, summary, created_at, completed_at FROM confirmations WHERE session_id = ? ORDER BY status ASC, created_at ASC'
+    )
+    .all(sessionId)
+
+  return rows.map(mapConfirmationRow)
+}
+
+const createConfirmation = (input: { sessionId: string; title: string }): ConfirmationRecord => {
+  const database = openDatabase()
+  if (!input.title?.trim()) {
+    throw new Error('Confirmation title is required')
+  }
+
+  const now = Date.now()
+  const id = randomUUID()
+  database
+    .prepare(
+      'INSERT INTO confirmations (id, session_id, title, status, created_at) VALUES (@id, @sessionId, @title, @status, @createdAt)'
+    )
+    .run({
+      id,
+      sessionId: input.sessionId,
+      title: input.title.trim(),
+      status: 'pending',
+      createdAt: now,
+    })
+
+  return {
+    id,
+    sessionId: input.sessionId,
+    title: input.title.trim(),
+    status: 'pending',
+    createdAt: now,
+  }
+}
+
+const updateConfirmation = (input: {
+  id: string
+  title?: string
+  status?: 'pending' | 'completed'
+  summary?: string
+}): ConfirmationRecord => {
+  const database = openDatabase()
+  const existing = database
+    .prepare<[string], ConfirmationDbRow>(
+      'SELECT id, session_id, title, status, summary, created_at, completed_at FROM confirmations WHERE id = ?'
+    )
+    .get(input.id)
+
+  if (!existing) {
+    throw new Error('Confirmation not found')
+  }
+
+  const newTitle = input.title?.trim() && input.title.trim().length > 0 ? input.title.trim() : existing.title
+  const newSummary = input.summary !== undefined ? input.summary : existing.summary ?? ''
+
+  let newStatus = existing.status as 'pending' | 'completed'
+  let newCompletedAt = existing.completed_at
+
+  if (input.status) {
+    newStatus = input.status
+    newCompletedAt = input.status === 'completed' ? newCompletedAt ?? Date.now() : null
+  }
+
+  database
+    .prepare(
+      'UPDATE confirmations SET title = @title, status = @status, summary = @summary, completed_at = @completedAt WHERE id = @id'
+    )
+    .run({
+      title: newTitle,
+      status: newStatus,
+      summary: newSummary,
+      completedAt: newCompletedAt,
+      id: input.id,
+    })
+
+  return {
+    id: existing.id,
+    sessionId: existing.session_id,
+    title: newTitle,
+    status: newStatus,
+    summary: newSummary || undefined,
+    createdAt: existing.created_at,
+    completedAt: newCompletedAt ?? undefined,
+  }
+}
+
+const deleteConfirmation = (id: string) => {
+  const database = openDatabase()
+  database.prepare<[string]>('DELETE FROM confirmations WHERE id = ?').run(id)
+}
+
 const generateAiSuggestion = async (input: {
   sessionId: string
   currentAgendaTitle?: string
@@ -692,6 +831,99 @@ JSON形式ではなく、読みやすい日本語の文章で回答してくだ�
   return summaryContent
 }
 
+const checkConfirmations = async (input: {
+  sessionId: string
+  secondsAgo?: number
+}): Promise<{ id: string; shouldCheck: boolean; reason: string; excerpt: string }[]> => {
+  // Gemini APIキーは設定ストアに保存されたものを使用する
+  const apiKey = getSetting('gemini_api_key')
+
+  if (!apiKey) {
+    throw new Error('Gemini API key is not configured. Please set it in Settings.')
+  }
+
+  // Fetch pending confirmations
+  const confirmations = listConfirmations(input.sessionId).filter(c => c.status === 'pending')
+
+  if (confirmations.length === 0) {
+    console.log('[ConfirmationCheck] No pending confirmations')
+    return []
+  }
+
+  // Fetch recent transcriptions
+  const transcriptions = getRecentTranscriptions(input.sessionId, input.secondsAgo ?? 180)
+
+  if (transcriptions.length === 0) {
+    console.log('[ConfirmationCheck] No transcriptions available')
+    return []
+  }
+
+  const recentText = transcriptions.map((t) => t.text).join('\n')
+
+  console.log('[ConfirmationCheck] Checking confirmations:', {
+    count: confirmations.length,
+    transcriptionLength: recentText.length,
+  })
+
+  const genAI = new GoogleGenerativeAI(apiKey)
+  const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' })
+
+  // Create confirmation list for prompt
+  const confirmationList = confirmations.map((c, idx) => `${idx + 1}. [ID: ${c.id}] ${c.title}`).join('\n')
+
+  const prompt = `あなたは会議の確認事項チェックアシスタントです。以下の会話内容を見て、各確認事項について言及されたか判定してください。
+
+確認事項リスト:
+${confirmationList}
+
+最近の会話内容:
+${recentText}
+
+各確認事項について、会話内で言及されたか判定し、以下のJSON形式で回答してください：
+{
+  "checks": [
+    {
+      "id": "確認事項のID",
+      "shouldCheck": true または false,
+      "reason": "判定理由（30文字以内）",
+      "excerpt": "該当する会話の抜粋（言及されていた場合のみ、60文字程度）"
+    }
+  ]
+}
+
+判定基準:
+- 確認事項のトピックについて明確に言及されている場合は shouldCheck: true
+- 単なるキーワードの一致だけでなく、内容的に言及されているかを判断してください
+- 不明確な場合は shouldCheck: false としてください
+- excerpt は該当する会話内容を元の文章から抜粋してください（言及されていない場合は空文字列）
+
+JSON以外の文字は含めないでください。`
+
+  console.log('[ConfirmationCheck] Sending request to Gemini...')
+
+  const result = await model.generateContent(prompt)
+  const response = result.response
+  const text = response.text()
+
+  let parsed: { checks: { id: string; shouldCheck: boolean; reason: string; excerpt: string }[] }
+
+  try {
+    const jsonMatch = text.match(/\{[\s\S]*\}/)
+    if (jsonMatch) {
+      parsed = JSON.parse(jsonMatch[0])
+    } else {
+      parsed = JSON.parse(text)
+    }
+  } catch (error) {
+    console.error('[ConfirmationCheck] Failed to parse response:', text)
+    throw new Error(`Failed to parse AI response: ${(error as Error).message}`)
+  }
+
+  console.log('[ConfirmationCheck] Results:', parsed.checks)
+
+  return parsed.checks
+}
+
 const registerIpcHandlers = () => {
   openDatabase()
 
@@ -741,6 +973,22 @@ const registerIpcHandlers = () => {
 
   ipcMain.handle('seam:get-summaries', (_event, payload: { sessionId: string; limit?: number }) => getSummaries(payload.sessionId, payload.limit))
   ipcMain.handle('seam:save-summary', (_event, payload: { sessionId: string; content: string }) => saveSummary(payload))
+
+  ipcMain.handle('seam:get-confirmations', (_event, payload: { sessionId: string }) => listConfirmations(payload.sessionId))
+  ipcMain.handle(
+    'seam:create-confirmation',
+    (_event, payload: { sessionId: string; title: string }) => createConfirmation(payload)
+  )
+  ipcMain.handle(
+    'seam:update-confirmation',
+    (_event, payload: { id: string; title?: string; status?: 'pending' | 'completed'; summary?: string }) =>
+      updateConfirmation(payload)
+  )
+  ipcMain.handle('seam:delete-confirmation', (_event, payload: { id: string }) => deleteConfirmation(payload.id))
+  ipcMain.handle(
+    'seam:check-confirmations',
+    async (_event, payload: { sessionId: string; secondsAgo?: number }) => checkConfirmations(payload)
+  )
 
   ipcMain.handle('seam:transcribe-audio', async (_event, payload: { path: string; locale?: string }) => {
     if (!payload?.path) {

@@ -55,3 +55,13 @@ export type SummaryRecord = {
   content: string
   createdAt: number
 }
+
+export type ConfirmationRecord = {
+  id: string
+  sessionId: string
+  title: string
+  status: 'pending' | 'completed'
+  summary?: string
+  createdAt: number
+  completedAt?: number
+}

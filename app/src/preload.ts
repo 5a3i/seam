@@ -1,5 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { SessionRecord, AgendaRecord, TranscriptionResult, TranscriptionRecord, SuggestionRecord, SummaryRecord } from './shared/types'
+import type {
+  SessionRecord,
+  AgendaRecord,
+  TranscriptionResult,
+  TranscriptionRecord,
+  SuggestionRecord,
+  SummaryRecord,
+  ConfirmationRecord,
+} from './shared/types'
 
 const api = {
   ping: () => 'pong',
@@ -45,6 +53,16 @@ const api = {
     ipcRenderer.invoke('seam:get-summaries', payload) as Promise<SummaryRecord[]>,
   saveSummary: (payload: { sessionId: string; content: string }) =>
     ipcRenderer.invoke('seam:save-summary', payload) as Promise<SummaryRecord>,
+  getConfirmations: (payload: { sessionId: string }) =>
+    ipcRenderer.invoke('seam:get-confirmations', payload) as Promise<ConfirmationRecord[]>,
+  createConfirmation: (payload: { sessionId: string; title: string }) =>
+    ipcRenderer.invoke('seam:create-confirmation', payload) as Promise<ConfirmationRecord>,
+  updateConfirmation: (payload: { id: string; title?: string; status?: 'pending' | 'completed'; summary?: string }) =>
+    ipcRenderer.invoke('seam:update-confirmation', payload) as Promise<ConfirmationRecord>,
+  deleteConfirmation: (payload: { id: string }) =>
+    ipcRenderer.invoke('seam:delete-confirmation', payload) as Promise<void>,
+  checkConfirmations: (payload: { sessionId: string; secondsAgo?: number }) =>
+    ipcRenderer.invoke('seam:check-confirmations', payload) as Promise<{ id: string; shouldCheck: boolean; reason: string; excerpt: string }[]>,
   transcribeAudio: (payload: { data: Uint8Array; mimeType: string; locale?: string }) =>
     ipcRenderer.invoke('seam:transcribe-buffer', {
       data: Buffer.from(payload.data),

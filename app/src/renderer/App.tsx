@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { SessionRecord, AgendaRecord, TranscriptionResult, SuggestionRecord, SummaryRecord } from '../shared/types'
+import type {
+  SessionRecord,
+  AgendaRecord,
+  TranscriptionResult,
+  SuggestionRecord,
+  SummaryRecord,
+  ConfirmationRecord,
+} from '../shared/types'
 
 export function App() {
   const [sessions, setSessions] = useState<SessionRecord[]>([])
@@ -175,8 +182,11 @@ export function App() {
       {/* Main 3-Column Layout */}
       <div className="flex flex-1 overflow-hidden">
         {/* Left Sidebar - Agenda */}
-        <aside className="w-80 border-r border-slate-800 bg-slate-900/50 overflow-y-auto">
-          <AgendaPanel session={selectedSession} />
+        <aside className="w-80 border-r border-slate-800 bg-slate-900/50">
+          <div className="h-full overflow-y-auto">
+            <AgendaPanel session={selectedSession} />
+            <ConfirmationPanel sessionId={selectedSession.id} />
+          </div>
         </aside>
 
         {/* Center - Live Transcription */}
@@ -303,6 +313,384 @@ function SessionTimer({ startedAt, endedAt, durationMinutes }: SessionTimerProps
       <span className="text-[10px] uppercase tracking-wide text-slate-500">
         全体 {durationMinutes}分
       </span>
+    </div>
+  )
+}
+
+type ConfirmationPanelProps = {
+  sessionId?: string
+}
+
+function ConfirmationPanel({ sessionId }: ConfirmationPanelProps) {
+  const [confirmations, setConfirmations] = useState<ConfirmationRecord[]>([])
+  const [isLoading, setIsLoading] = useState(false)
+  const [newTitle, setNewTitle] = useState('')
+  const [editSummaries, setEditSummaries] = useState<Record<string, string>>({})
+  const [isSavingSummary, setIsSavingSummary] = useState<Record<string, boolean>>({})
+  const [isAutoChecking, setIsAutoChecking] = useState(false)
+  const [expandedSummaries, setExpandedSummaries] = useState<Record<string, boolean>>({})
+  const autoCheckTimerRef = useRef<number | null>(null)
+
+  const loadConfirmations = useCallback(async () => {
+    if (!sessionId) {
+      setConfirmations([])
+      setEditSummaries({})
+      return
+    }
+
+    try {
+      setIsLoading(true)
+      const records = await window.seam.getConfirmations({ sessionId })
+      setConfirmations(records)
+      setEditSummaries(
+        records.reduce<Record<string, string>>((acc, record) => {
+          acc[record.id] = record.summary ?? ''
+          return acc
+        }, {})
+      )
+    } catch (error) {
+      console.error('[seam] Failed to load confirmations:', error)
+    } finally {
+      setIsLoading(false)
+    }
+  }, [sessionId])
+
+  useEffect(() => {
+    void loadConfirmations()
+  }, [loadConfirmations])
+
+  const handleAdd = async () => {
+    if (!sessionId || !newTitle.trim()) return
+    try {
+      const record = await window.seam.createConfirmation({ sessionId, title: newTitle.trim() })
+      setConfirmations((prev) => [record, ...prev])
+      setEditSummaries((prev) => ({ ...prev, [record.id]: '' }))
+      setNewTitle('')
+    } catch (error) {
+      console.error('[seam] Failed to create confirmation item:', error)
+    }
+  }
+
+  const handleToggleStatus = async (item: ConfirmationRecord, checked: boolean) => {
+    try {
+      const updated = await window.seam.updateConfirmation({
+        id: item.id,
+        status: checked ? 'completed' : 'pending',
+      })
+      setConfirmations((prev) => prev.map((record) => (record.id === updated.id ? updated : record)))
+      setEditSummaries((prev) => ({ ...prev, [updated.id]: updated.summary ?? '' }))
+    } catch (error) {
+      console.error('[seam] Failed to update confirmation status:', error)
+    }
+  }
+
+  const handleSummaryChange = (id: string, value: string) => {
+    setEditSummaries((prev) => ({ ...prev, [id]: value }))
+  }
+
+  const handleSummarySave = async (item: ConfirmationRecord) => {
+    const summary = editSummaries[item.id] ?? ''
+    try {
+      setIsSavingSummary((prev) => ({ ...prev, [item.id]: true }))
+      const updated = await window.seam.updateConfirmation({ id: item.id, summary })
+      setConfirmations((prev) => prev.map((record) => (record.id === updated.id ? updated : record)))
+      setEditSummaries((prev) => ({ ...prev, [item.id]: updated.summary ?? '' }))
+    } catch (error) {
+      console.error('[seam] Failed to save confirmation summary:', error)
+    } finally {
+      setIsSavingSummary((prev) => ({ ...prev, [item.id]: false }))
+    }
+  }
+
+  const handleDelete = async (id: string) => {
+    try {
+      await window.seam.deleteConfirmation({ id })
+      setConfirmations((prev) => prev.filter((record) => record.id !== id))
+      setEditSummaries((prev) => {
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
+      setExpandedSummaries((prev) => {
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
+    } catch (error) {
+      console.error('[seam] Failed to delete confirmation item:', error)
+    }
+  }
+
+  const toggleSummaryExpanded = (id: string) => {
+    setExpandedSummaries((prev) => ({
+      ...prev,
+      [id]: !prev[id],
+    }))
+  }
+
+  const checkConfirmationsAuto = useCallback(async () => {
+    if (!sessionId || isAutoChecking) return
+
+    const pending = confirmations.filter((item) => item.status === 'pending')
+    if (pending.length === 0) return
+
+    try {
+      setIsAutoChecking(true)
+      console.log('[ConfirmationPanel] Running auto-check...')
+      const results = await window.seam.checkConfirmations({ sessionId, secondsAgo: 180 })
+
+      // Update confirmations that should be checked
+      for (const result of results) {
+        if (result.shouldCheck) {
+          console.log(`[ConfirmationPanel] Auto-checking: ${result.id} - ${result.reason}`)
+
+          // Build summary with reason and excerpt
+          let summaryText = `【判定理由】\n${result.reason}`
+          if (result.excerpt && result.excerpt.trim().length > 0) {
+            summaryText += `\n\n【該当する会話】\n${result.excerpt}`
+          }
+
+          const updated = await window.seam.updateConfirmation({
+            id: result.id,
+            status: 'completed',
+            summary: summaryText,
+          })
+          setConfirmations((prev) => prev.map((record) => (record.id === updated.id ? updated : record)))
+          setEditSummaries((prev) => ({ ...prev, [updated.id]: updated.summary ?? '' }))
+        }
+      }
+    } catch (error) {
+      console.error('[ConfirmationPanel] Auto-check failed:', error)
+    } finally {
+      setIsAutoChecking(false)
+    }
+  }, [sessionId, isAutoChecking, confirmations])
+
+  // Start auto-check timer when recording starts
+  useEffect(() => {
+    return () => {
+      if (autoCheckTimerRef.current !== null) {
+        window.clearInterval(autoCheckTimerRef.current)
+        autoCheckTimerRef.current = null
+      }
+    }
+  }, [])
+
+  // Expose start/stop auto-check functions via custom events
+  useEffect(() => {
+    const handleStartAutoCheck = () => {
+      console.log('[ConfirmationPanel] Starting auto-check timer')
+      if (autoCheckTimerRef.current !== null) {
+        window.clearInterval(autoCheckTimerRef.current)
+      }
+      // Run immediately
+      void checkConfirmationsAuto()
+      // Then every 30 seconds
+      autoCheckTimerRef.current = window.setInterval(() => {
+        void checkConfirmationsAuto()
+      }, 30000)
+    }
+
+    const handleStopAutoCheck = () => {
+      console.log('[ConfirmationPanel] Stopping auto-check timer')
+      if (autoCheckTimerRef.current !== null) {
+        window.clearInterval(autoCheckTimerRef.current)
+        autoCheckTimerRef.current = null
+      }
+    }
+
+    window.addEventListener('start-confirmation-autocheck', handleStartAutoCheck)
+    window.addEventListener('stop-confirmation-autocheck', handleStopAutoCheck)
+
+    return () => {
+      window.removeEventListener('start-confirmation-autocheck', handleStartAutoCheck)
+      window.removeEventListener('stop-confirmation-autocheck', handleStopAutoCheck)
+    }
+  }, [checkConfirmationsAuto])
+
+  const pendingCount = confirmations.filter((item) => item.status === 'pending').length
+
+  return (
+    <div className="border-t border-slate-800/80 bg-slate-950/40">
+      <div className="space-y-4 p-6">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-sm font-medium text-slate-300">確認事項</h2>
+            <p className="text-xs text-slate-500">
+              事前に確認したいポイントを記録して進行時にチェックしましょう
+              {isAutoChecking && <span className="ml-2 text-emerald-400">• AI自動チェック中...</span>}
+            </p>
+          </div>
+          <span className="rounded-full border border-slate-700 bg-slate-900 px-2.5 py-1 text-[10px] uppercase tracking-wide text-slate-400">
+            残り {pendingCount}
+          </span>
+        </div>
+
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={newTitle}
+            onChange={(e) => setNewTitle(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                handleAdd()
+              }
+            }}
+            placeholder="例: カスタマーからの要望事項"
+            className="flex-1 rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+          />
+          <button
+            type="button"
+            onClick={handleAdd}
+            disabled={!newTitle.trim() || !sessionId}
+            className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            追加
+          </button>
+        </div>
+
+        {isLoading ? (
+          <div className="flex items-center justify-center py-8 text-sm text-slate-500">
+            読み込み中...
+          </div>
+        ) : confirmations.length === 0 ? (
+          <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-6 text-sm text-slate-400">
+            確認したいポイントを追加するとここに表示されます
+          </div>
+        ) : (
+          <ul className="space-y-3">
+            {confirmations.map((item) => {
+              const summaryDraft = editSummaries[item.id] ?? ''
+              const originalSummary = item.summary ?? ''
+              const isCompleted = item.status === 'completed'
+              const isDirty = summaryDraft !== originalSummary
+              const saving = isSavingSummary[item.id]
+
+              return (
+                <li
+                  key={item.id}
+                  className={`rounded-lg border px-4 py-3 ${
+                    isCompleted
+                      ? 'border-emerald-600/40 bg-emerald-600/10'
+                      : 'border-slate-800 bg-slate-900/50'
+                  }`}
+                >
+                  <div className="flex items-start gap-3">
+                    <input
+                      type="checkbox"
+                      checked={isCompleted}
+                      onChange={(e) => handleToggleStatus(item, e.target.checked)}
+                      className="mt-1 h-4 w-4 rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-500"
+                    />
+                    <div className="flex-1 space-y-1">
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <p className={`text-sm font-medium ${isCompleted ? 'text-emerald-100' : 'text-slate-100'}`}>
+                            {item.title}
+                          </p>
+                          <p className="text-[11px] text-slate-500">
+                            {isCompleted
+                              ? item.completedAt
+                                ? `確認済み: ${new Date(item.completedAt).toLocaleTimeString('ja-JP', {
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                    second: '2-digit',
+                                  })}`
+                                : '確認済み'
+                              : '未確認'}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleDelete(item.id)}
+                          className="text-slate-500 transition hover:text-slate-300"
+                          aria-label="確認事項を削除"
+                        >
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                      </div>
+
+                      {isCompleted && item.summary ? (
+                        <div className="mt-2 space-y-2">
+                          {/* Summary preview/toggle button */}
+                          <button
+                            type="button"
+                            onClick={() => toggleSummaryExpanded(item.id)}
+                            className="flex w-full items-center justify-between rounded-lg border border-emerald-500/30 bg-emerald-900/20 px-3 py-2 text-left transition hover:bg-emerald-900/30"
+                          >
+                            <div className="flex items-center gap-2">
+                              <svg
+                                className={`h-4 w-4 text-emerald-400 transition-transform ${expandedSummaries[item.id] ? 'rotate-90' : ''}`}
+                                fill="none"
+                                viewBox="0 0 24 24"
+                                stroke="currentColor"
+                              >
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                              </svg>
+                              <span className="text-xs font-medium text-emerald-300">
+                                {expandedSummaries[item.id] ? '詳細を閉じる' : '詳細を見る'}
+                              </span>
+                            </div>
+                            <span className="text-[10px] text-emerald-400">
+                              {summaryDraft.length}文字
+                            </span>
+                          </button>
+
+                          {/* Expanded summary content */}
+                          {expandedSummaries[item.id] && (
+                            <div className="space-y-2 rounded-lg border border-emerald-500/30 bg-slate-900/40 p-3">
+                              <textarea
+                                value={summaryDraft}
+                                onChange={(e) => handleSummaryChange(item.id, e.target.value)}
+                                placeholder="会話の要点や合意事項をメモ"
+                                className="w-full rounded-lg border border-emerald-500/40 bg-slate-900/70 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+                                rows={6}
+                              />
+                              <div className="flex items-center justify-end">
+                                <button
+                                  type="button"
+                                  onClick={() => handleSummarySave(item)}
+                                  disabled={!isDirty || saving}
+                                  className="rounded-md bg-emerald-600 px-3 py-1 text-xs font-medium text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40"
+                                >
+                                  {saving ? '保存中...' : '保存'}
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      ) : isCompleted && !item.summary ? (
+                        <div className="mt-2 space-y-2">
+                          <textarea
+                            value={summaryDraft}
+                            onChange={(e) => handleSummaryChange(item.id, e.target.value)}
+                            placeholder="会話の要点や合意事項をメモ"
+                            className="w-full rounded-lg border border-emerald-500/40 bg-slate-900/70 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+                            rows={3}
+                          />
+                          <div className="flex items-center justify-between text-xs text-slate-400">
+                            <span>{summaryDraft.length}文字</span>
+                            <button
+                              type="button"
+                              onClick={() => handleSummarySave(item)}
+                              disabled={!isDirty || saving}
+                              className="rounded-md bg-emerald-600 px-3 py-1 text-xs font-medium text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              {saving ? '保存中...' : '保存'}
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </div>
     </div>
   )
 }
@@ -705,7 +1093,9 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
   const [continuousMode, setContinuousMode] = useState(false)
   const [summaries, setSummaries] = useState<SummaryRecord[]>([])
   const [isSummaryGenerating, setIsSummaryGenerating] = useState(false)
+  const [summaryError, setSummaryError] = useState<string | null>(null)
   const summaryTimerRef = useRef<number | null>(null)
+  const summaryContainerRef = useRef<HTMLDivElement | null>(null)
 
   // Load existing summaries when component mounts or sessionId changes
   useEffect(() => {
@@ -726,18 +1116,34 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
     void loadSummaries()
   }, [sessionId])
 
+  // Auto-scroll to latest summary when summaries are updated
+  useEffect(() => {
+    if (summaries.length > 0 && summaryContainerRef.current) {
+      // Use setTimeout to ensure DOM is updated
+      setTimeout(() => {
+        summaryContainerRef.current?.scrollTo({
+          top: summaryContainerRef.current.scrollHeight,
+          behavior: 'smooth',
+        })
+      }, 100)
+    }
+  }, [summaries.length])
+
   const generateAndUpdateSummary = useCallback(async () => {
     if (!sessionId || isSummaryGenerating) return
 
     try {
       setIsSummaryGenerating(true)
-      // const newSummaryText = await window.seam.generateSummary({ sessionId })
-      // The summary is already saved in the database by generateSummary
+      setSummaryError(null)
+      // Generate summary and save to database
+      await window.seam.generateSummary({ sessionId })
       // Reload all summaries to get the updated list
       const updatedSummaries = await window.seam.getSummaries({ sessionId })
       setSummaries(updatedSummaries)
     } catch (error) {
-      console.error('[seam] Failed to generate summary:', error)
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      console.error('[seam] Failed to generate summary:', errorMessage)
+      setSummaryError(errorMessage)
     } finally {
       setIsSummaryGenerating(false)
     }
@@ -965,6 +1371,9 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
         // Generate initial summary immediately
         void generateAndUpdateSummary()
 
+        // Start confirmation auto-check
+        window.dispatchEvent(new CustomEvent('start-confirmation-autocheck'))
+
         // Start the first cycle
         void startContinuousRecordingCycle()
       } else {
@@ -1042,6 +1451,9 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
 
     setContinuousMode(false)
     continuousModeRef.current = false
+
+    // Stop confirmation auto-check
+    window.dispatchEvent(new CustomEvent('stop-confirmation-autocheck'))
 
     if (recorderRef.current && recorderRef.current.state !== 'inactive') {
       recorderRef.current.stop()
@@ -1123,8 +1535,17 @@ function MicrophonePanel({ sessionId }: MicrophonePanelProps) {
             )}
           </div>
 
+          {summaryError && (
+            <div className="rounded-lg border border-rose-400/50 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+              サマリ生成エラー: {summaryError}
+            </div>
+          )}
+
           {summaries.length > 0 ? (
-            <div className="space-y-2">
+            <div
+              ref={summaryContainerRef}
+              className="space-y-2 max-h-96 overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-slate-900"
+            >
               {summaries.map((summary, index) => (
                 <div key={summary.id} className="rounded-lg bg-green-900/20 border border-green-800/30 px-4 py-3">
                   <div className="flex items-center gap-2 mb-2">
