@@ -6,8 +6,13 @@ import { createRequire } from 'node:module'
 import { mkdirSync, existsSync, promises as fsPromises } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
-import { GoogleGenerativeAI } from '@google/generative-ai'
 import { transcribeAudioFile, normalizeToBuffer, extensionFromMime } from './main/transcription'
+import {
+  generateAIResponse,
+  parseAIJsonResponse,
+  validateAPIKey,
+  type AIProviderConfig,
+} from './main/ai-provider'
 import type {
   SessionRecord,
   AgendaRecord,
@@ -15,6 +20,7 @@ import type {
   TranscriptionRecord,
   SummaryRecord,
   ConfirmationRecord,
+  AIProvider,
 } from './shared/types'
 import type { Database as BetterSqliteDatabase } from 'better-sqlite3'
 
@@ -29,7 +35,7 @@ const DB_FILENAME = 'seam.db'
 let cachedDbPath: string | null = null
 let db: BetterSqliteDatabase | null = null
 let isDbInitialized = false
-type SessionDbRow = { id: string; title: string; duration: number | null; started_at: number | null; ended_at: number | null; created_at: number }
+type SessionDbRow = { id: string; title: string; duration: number | null; started_at: number | null; ended_at: number | null; ai_provider: string | null; created_at: number }
 type AgendaDbRow = { id: string; session_id: string; title: string; order: number; status: string; created_at: number }
 type SuggestionDbRow = {
   id: string
@@ -126,6 +132,13 @@ const ensureSchema = (database: BetterSqliteDatabase) => {
 
   try {
     database.exec(`ALTER TABLE sessions ADD COLUMN ended_at INTEGER`)
+  } catch (err) {
+    // Column already exists, ignore
+  }
+
+  // Migration: Add ai_provider column if it doesn't exist
+  try {
+    database.exec(`ALTER TABLE sessions ADD COLUMN ai_provider TEXT DEFAULT 'gemini'`)
   } catch (err) {
     // Column already exists, ignore
   }
@@ -237,19 +250,20 @@ const mapSessionRow = (row: SessionDbRow): SessionRecord => ({
   duration: row.duration ?? undefined,
   startedAt: row.started_at ?? undefined,
   endedAt: row.ended_at ?? undefined,
+  aiProvider: (row.ai_provider as AIProvider) ?? undefined,
   createdAt: row.created_at,
 })
 
 const listSessions = (): SessionRecord[] => {
   const database = openDatabase()
   const rows = database
-    .prepare<[], SessionDbRow>('SELECT id, title, duration, started_at, ended_at, created_at FROM sessions ORDER BY created_at DESC LIMIT 20')
+    .prepare<[], SessionDbRow>('SELECT id, title, duration, started_at, ended_at, ai_provider, created_at FROM sessions ORDER BY created_at DESC LIMIT 20')
     .all()
 
   return rows.map(mapSessionRow)
 }
 
-const createSession = (input: { title?: string; duration?: number; agendaItems?: string[] } = {}): SessionRecord => {
+const createSession = (input: { title?: string; duration?: number; agendaItems?: string[]; aiProvider?: AIProvider } = {}): SessionRecord => {
   const database = openDatabase()
   const title =
     typeof input.title === 'string' && input.title.trim().length > 0
@@ -260,10 +274,11 @@ const createSession = (input: { title?: string; duration?: number; agendaItems?:
   const id = randomUUID()
   const duration = input.duration ?? null
   const startedAt = null // Will be set when session actually starts
+  const aiProvider = input.aiProvider ?? 'gemini' // Default to gemini if not specified
 
-  database.prepare<[string, string, number | null, number | null, number]>(
-    'INSERT INTO sessions (id, title, duration, started_at, created_at) VALUES (?, ?, ?, ?, ?)'
-  ).run(id, title, duration, startedAt, now)
+  database.prepare<[string, string, number | null, number | null, string, number]>(
+    'INSERT INTO sessions (id, title, duration, started_at, ai_provider, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(id, title, duration, startedAt, aiProvider, now)
 
   // Create agenda items if provided
   if (input.agendaItems && input.agendaItems.length > 0) {
@@ -547,6 +562,49 @@ const setSetting = (key: string, value: string): void => {
     .run(key, value, now)
 }
 
+/**
+ * Get AI provider configuration from settings or session
+ */
+const getAIProviderConfig = (sessionId?: string): AIProviderConfig => {
+  let provider: AIProvider
+
+  // If sessionId is provided, use session-specific provider
+  if (sessionId) {
+    const database = openDatabase()
+    const row = database
+      .prepare<[string], SessionDbRow>('SELECT ai_provider FROM sessions WHERE id = ?')
+      .get(sessionId)
+
+    provider = (row?.ai_provider as AIProvider) || 'gemini'
+  } else {
+    // Otherwise, use global setting (default to 'gemini' for backward compatibility)
+    provider = (getSetting('ai_provider') as AIProvider) || 'gemini'
+  }
+
+  // Get API key based on provider
+  let apiKey: string | undefined
+
+  switch (provider) {
+    case 'gemini':
+      apiKey = getSetting('gemini_api_key') || undefined
+      break
+    case 'claude':
+      apiKey = getSetting('claude_api_key') || undefined
+      break
+    case 'chatgpt':
+      apiKey = getSetting('chatgpt_api_key') || undefined
+      break
+  }
+
+  // Validate API key is configured
+  validateAPIKey(apiKey, provider)
+
+  return {
+    provider,
+    apiKey: apiKey!,
+  }
+}
+
 const mapSummaryRow = (row: SummaryDbRow): SummaryRecord => ({
   id: row.id,
   sessionId: row.session_id,
@@ -697,12 +755,8 @@ const generateAiSuggestion = async (input: {
   currentAgendaTitle?: string
   nextAgendaTitle?: string
 }): Promise<SuggestionRecord> => {
-  // Gemini APIキーは設定ストアに保存されたものを使用する
-  const apiKey = getSetting('gemini_api_key')
-
-  if (!apiKey) {
-    throw new Error('Gemini API key is not configured. Please set it in Settings.')
-  }
+  // Get AI provider configuration for this session
+  const config = getAIProviderConfig(input.sessionId)
 
   // Fetch recent transcriptions from the database (last 120-180 seconds)
   const transcriptions = getRecentTranscriptions(input.sessionId, 180)
@@ -710,6 +764,7 @@ const generateAiSuggestion = async (input: {
   console.log('[AI] Fetched transcriptions:', {
     count: transcriptions.length,
     sessionId: input.sessionId,
+    provider: config.provider,
     timestamps: transcriptions.map(t => ({
       time: new Date(t.createdAt).toISOString(),
       preview: t.text.substring(0, 30) + '...'
@@ -722,9 +777,6 @@ const generateAiSuggestion = async (input: {
 
   console.log('[AI] Combined transcriptions length:', recentTranscriptions.length, 'chars')
   console.log('[AI] Combined transcriptions preview:', recentTranscriptions.substring(0, 200) + '...')
-
-  const genAI = new GoogleGenerativeAI(apiKey)
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' })
 
   const prompt = `あなたは会議のファシリテーターアシスタントです。以下の会話内容を元に、簡潔な提案を生成してください。
 
@@ -743,29 +795,18 @@ ${recentTranscriptions}
 
 JSON以外の文字は含めないでください。`
 
-  console.log('[AI] Full prompt being sent to Gemini:')
+  console.log(`[AI] Full prompt being sent to ${config.provider}:`)
   console.log('=====================================')
   console.log(prompt)
   console.log('=====================================')
 
-  const result = await model.generateContent(prompt)
-  const response = result.response
-  const text = response.text()
+  const text = await generateAIResponse(config, prompt)
 
-  let parsed: { summary: string; bridgingQuestion: string; followUpQuestions: string[] }
-
-  try {
-    // JSONブロックから抽出を試みる
-    const jsonMatch = text.match(/\{[\s\S]*\}/)
-    if (jsonMatch) {
-      parsed = JSON.parse(jsonMatch[0])
-    } else {
-      parsed = JSON.parse(text)
-    }
-  } catch (error) {
-    console.error('[AI] Failed to parse response:', text)
-    throw new Error(`Failed to parse AI response: ${(error as Error).message}`)
-  }
+  const parsed = parseAIJsonResponse<{
+    summary: string
+    bridgingQuestion: string
+    followUpQuestions: string[]
+  }>(text)
 
   return createSuggestion({
     sessionId: input.sessionId,
@@ -779,12 +820,8 @@ const generateSummary = async (input: {
   sessionId: string
   secondsAgo?: number
 }): Promise<string> => {
-  // Gemini APIキーは設定ストアに保存されたものを使用する
-  const apiKey = getSetting('gemini_api_key')
-
-  if (!apiKey) {
-    throw new Error('Gemini API key is not configured. Please set it in Settings.')
-  }
+  // Get AI provider configuration for this session
+  const config = getAIProviderConfig(input.sessionId)
 
   // Fetch all transcriptions from the session start
   const transcriptions = getRecentTranscriptions(input.sessionId, input.secondsAgo ?? 999999)
@@ -792,6 +829,7 @@ const generateSummary = async (input: {
   console.log('[Summary] Fetched transcriptions:', {
     count: transcriptions.length,
     sessionId: input.sessionId,
+    provider: config.provider,
   })
 
   if (transcriptions.length === 0) {
@@ -801,9 +839,6 @@ const generateSummary = async (input: {
   const allTranscriptions = transcriptions.map((t) => t.text).join('\n')
 
   console.log('[Summary] Combined transcriptions length:', allTranscriptions.length, 'chars')
-
-  const genAI = new GoogleGenerativeAI(apiKey)
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' })
 
   const prompt = `以下の会話内容全体を簡潔にまとめてください。
 
@@ -818,9 +853,7 @@ JSON形式ではなく、読みやすい日本語の文章で回答してくだ�
 
   console.log('[Summary] Generating summary...')
 
-  const result = await model.generateContent(prompt)
-  const response = result.response
-  const text = response.text()
+  const text = await generateAIResponse(config, prompt)
 
   console.log('[Summary] Generated summary:', text.substring(0, 100) + '...')
 
@@ -835,12 +868,8 @@ const checkConfirmations = async (input: {
   sessionId: string
   secondsAgo?: number
 }): Promise<{ id: string; shouldCheck: boolean; reason: string; excerpt: string }[]> => {
-  // Gemini APIキーは設定ストアに保存されたものを使用する
-  const apiKey = getSetting('gemini_api_key')
-
-  if (!apiKey) {
-    throw new Error('Gemini API key is not configured. Please set it in Settings.')
-  }
+  // Get AI provider configuration for this session
+  const config = getAIProviderConfig(input.sessionId)
 
   // Fetch pending confirmations
   const confirmations = listConfirmations(input.sessionId).filter(c => c.status === 'pending')
@@ -863,10 +892,8 @@ const checkConfirmations = async (input: {
   console.log('[ConfirmationCheck] Checking confirmations:', {
     count: confirmations.length,
     transcriptionLength: recentText.length,
+    provider: config.provider,
   })
-
-  const genAI = new GoogleGenerativeAI(apiKey)
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' })
 
   // Create confirmation list for prompt
   const confirmationList = confirmations.map((c, idx) => `${idx + 1}. [ID: ${c.id}] ${c.title}`).join('\n')
@@ -899,25 +926,13 @@ ${recentText}
 
 JSON以外の文字は含めないでください。`
 
-  console.log('[ConfirmationCheck] Sending request to Gemini...')
+  console.log(`[ConfirmationCheck] Sending request to ${config.provider}...`)
 
-  const result = await model.generateContent(prompt)
-  const response = result.response
-  const text = response.text()
+  const text = await generateAIResponse(config, prompt)
 
-  let parsed: { checks: { id: string; shouldCheck: boolean; reason: string; excerpt: string }[] }
-
-  try {
-    const jsonMatch = text.match(/\{[\s\S]*\}/)
-    if (jsonMatch) {
-      parsed = JSON.parse(jsonMatch[0])
-    } else {
-      parsed = JSON.parse(text)
-    }
-  } catch (error) {
-    console.error('[ConfirmationCheck] Failed to parse response:', text)
-    throw new Error(`Failed to parse AI response: ${(error as Error).message}`)
-  }
+  const parsed = parseAIJsonResponse<{
+    checks: { id: string; shouldCheck: boolean; reason: string; excerpt: string }[]
+  }>(text)
 
   console.log('[ConfirmationCheck] Results:', parsed.checks)
 

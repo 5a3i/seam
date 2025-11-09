@@ -6,6 +6,7 @@ import type {
   SuggestionRecord,
   SummaryRecord,
   ConfirmationRecord,
+  AIProvider,
 } from '../shared/types'
 
 export function App() {
@@ -36,10 +37,10 @@ export function App() {
     setView('settings')
   }, [])
 
-  const handleCreateSession = useCallback(async (title: string, duration: number, agendaItems: string[]) => {
+  const handleCreateSession = useCallback(async (title: string, duration: number, agendaItems: string[], aiProvider: AIProvider) => {
     try {
       setIsCreating(true)
-      const session = await window.seam.createSession({ title, duration, agendaItems })
+      const session = await window.seam.createSession({ title, duration, agendaItems, aiProvider })
       setSessions((prev) => [session, ...prev.filter((s) => s.id !== session.id)])
       setSelectedSessionId(session.id)
       setView('detail')
@@ -132,6 +133,13 @@ export function App() {
             ← 一覧
           </button>
           <h1 className="text-lg font-semibold text-slate-100">{selectedSession.title}</h1>
+          {selectedSession.aiProvider && (
+            <span className="rounded-full bg-blue-600/20 px-3 py-1 text-xs font-medium text-blue-400 border border-blue-500/30">
+              {selectedSession.aiProvider === 'gemini' && '🤖 Gemini 2.5 Flash'}
+              {selectedSession.aiProvider === 'claude' && '🤖 Claude Sonnet 4'}
+              {selectedSession.aiProvider === 'chatgpt' && '🤖 GPT-4o'}
+            </span>
+          )}
           <span className="text-sm text-slate-400">
             {selectedSession.startedAt && new Date(selectedSession.startedAt).toLocaleString('ja-JP', {
               year: 'numeric',
@@ -750,64 +758,106 @@ function SessionListScreen({ sessions, onSelectSession, onCreateNew, onOpenSetti
             </div>
           </div>
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {sessions.map((session) => {
-              const isActive = session.startedAt && !session.endedAt
-              const duration = session.duration ? `${session.duration}分` : ''
-              const startedDate = session.startedAt
-                ? new Date(session.startedAt).toLocaleString('ja-JP', {
-                    month: '2-digit',
-                    day: '2-digit',
-                    hour: '2-digit',
-                    minute: '2-digit',
-                  })
-                : new Date(session.createdAt).toLocaleString('ja-JP', {
-                    month: '2-digit',
-                    day: '2-digit',
-                    hour: '2-digit',
-                    minute: '2-digit',
-                  })
+          <div className="mx-auto max-w-4xl space-y-8">
+            {(() => {
+              // Group sessions by date
+              const groupedSessions = sessions.reduce((groups, session) => {
+                const date = new Date(session.startedAt || session.createdAt)
+                const dateKey = date.toLocaleDateString('ja-JP', {
+                  year: 'numeric',
+                  month: '2-digit',
+                  day: '2-digit',
+                })
 
-              return (
-                <button
-                  key={session.id}
-                  onClick={() => onSelectSession(session.id)}
-                  className="group relative rounded-xl border border-slate-200 bg-white p-6 text-left shadow-sm transition hover:border-blue-300 hover:shadow-md"
-                >
-                  {isActive && (
-                    <div className="absolute right-4 top-4 flex items-center gap-1.5 rounded-full bg-green-100 px-2.5 py-1 text-xs font-medium text-green-700">
-                      <div className="h-1.5 w-1.5 animate-pulse rounded-full bg-green-500" />
-                      進行中
+                if (!groups[dateKey]) {
+                  groups[dateKey] = []
+                }
+                groups[dateKey].push(session)
+                return groups
+              }, {} as Record<string, typeof sessions>)
+
+              // Get today, yesterday for special labels
+              const today = new Date()
+              const yesterday = new Date(today)
+              yesterday.setDate(yesterday.getDate() - 1)
+
+              const todayKey = today.toLocaleDateString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit' })
+              const yesterdayKey = yesterday.toLocaleDateString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit' })
+
+              return Object.entries(groupedSessions).map(([dateKey, dateSessions]) => {
+                let dateLabel = dateKey
+                if (dateKey === todayKey) {
+                  dateLabel = '今日'
+                } else if (dateKey === yesterdayKey) {
+                  dateLabel = '昨日'
+                }
+
+                return (
+                  <div key={dateKey} className="space-y-3">
+                    <h2 className="sticky top-0 z-10 bg-gradient-to-br from-slate-50 to-slate-100 px-4 py-2 text-sm font-semibold text-gray-700">
+                      {dateLabel}
+                    </h2>
+                    <div className="space-y-2">
+                      {dateSessions.map((session) => {
+                        const isActive = session.startedAt && !session.endedAt
+                        const duration = session.duration ? `${session.duration}分` : ''
+                        const time = new Date(session.startedAt || session.createdAt).toLocaleTimeString('ja-JP', {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })
+
+                        return (
+                          <button
+                            key={session.id}
+                            onClick={() => onSelectSession(session.id)}
+                            className="group relative flex w-full items-center gap-4 rounded-lg border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:border-blue-300 hover:bg-blue-50/50 hover:shadow-md"
+                          >
+                            {/* Time */}
+                            <div className="flex-shrink-0 text-center">
+                              <div className="text-sm font-semibold text-gray-900">{time}</div>
+                              {duration && <div className="text-xs text-gray-500">{duration}</div>}
+                            </div>
+
+                            {/* Divider */}
+                            <div className="h-12 w-px bg-slate-200" />
+
+                            {/* Content */}
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 mb-1">
+                                <h3 className="truncate text-base font-semibold text-gray-900 group-hover:text-blue-600">
+                                  {session.title}
+                                </h3>
+                                {isActive && (
+                                  <span className="flex-shrink-0 flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">
+                                    <div className="h-1.5 w-1.5 animate-pulse rounded-full bg-green-500" />
+                                    進行中
+                                  </span>
+                                )}
+                              </div>
+                              {session.aiProvider && (
+                                <div className="flex items-center gap-1.5 text-xs text-gray-600">
+                                  <span>🤖</span>
+                                  {session.aiProvider === 'gemini' && 'Gemini 2.5 Flash'}
+                                  {session.aiProvider === 'claude' && 'Claude Sonnet 4'}
+                                  {session.aiProvider === 'chatgpt' && 'GPT-4o'}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Arrow */}
+                            <div className="flex-shrink-0 text-gray-400 transition group-hover:text-blue-600">
+                              <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                              </svg>
+                            </div>
+                          </button>
+                        )
+                      })}
                     </div>
-                  )}
-
-                  <h3 className="mb-2 text-base font-semibold text-gray-900 group-hover:text-blue-600">
-                    {session.title}
-                  </h3>
-
-                  <div className="space-y-1.5 text-xs text-gray-500">
-                    <div className="flex items-center gap-1.5">
-                      <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      </svg>
-                      {startedDate}
-                    </div>
-                    {duration && (
-                      <div className="flex items-center gap-1.5">
-                        <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                        </svg>
-                        {duration}
-                      </div>
-                    )}
                   </div>
-
-                  <div className="mt-4 text-xs font-medium text-blue-600 opacity-0 transition group-hover:opacity-100">
-                    詳細を見る →
-                  </div>
-                </button>
-              )
-            })}
+                )
+              })
+            })()}
           </div>
         )}
       </div>
@@ -1608,7 +1658,10 @@ type SettingsScreenProps = {
 }
 
 function SettingsScreen({ onClose }: SettingsScreenProps) {
+  const [aiProvider, setAiProvider] = useState<AIProvider>('gemini')
   const [geminiApiKey, setGeminiApiKey] = useState('')
+  const [claudeApiKey, setClaudeApiKey] = useState('')
+  const [chatgptApiKey, setChatgptApiKey] = useState('')
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   const [saveSuccess, setSaveSuccess] = useState(false)
@@ -1618,10 +1671,23 @@ function SettingsScreen({ onClose }: SettingsScreenProps) {
     const loadSettings = async () => {
       try {
         setIsLoading(true)
-        const apiKey = await window.seam.getSetting({ key: 'gemini_api_key' })
-        if (apiKey) {
-          setGeminiApiKey(apiKey)
+
+        // Load AI provider selection
+        const provider = await window.seam.getSetting({ key: 'ai_provider' })
+        if (provider) {
+          setAiProvider(provider as AIProvider)
         }
+
+        // Load all API keys
+        const geminiKey = await window.seam.getSetting({ key: 'gemini_api_key' })
+        if (geminiKey) setGeminiApiKey(geminiKey)
+
+        const claudeKey = await window.seam.getSetting({ key: 'claude_api_key' })
+        if (claudeKey) setClaudeApiKey(claudeKey)
+
+        const chatgptKey = await window.seam.getSetting({ key: 'chatgpt_api_key' })
+        if (chatgptKey) setChatgptApiKey(chatgptKey)
+
       } catch (err) {
         console.error('[seam] Failed to load settings:', err)
         setError(err instanceof Error ? err.message : String(err))
@@ -1638,7 +1704,13 @@ function SettingsScreen({ onClose }: SettingsScreenProps) {
       setError(null)
       setSaveSuccess(false)
 
+      // Save AI provider selection
+      await window.seam.setSetting({ key: 'ai_provider', value: aiProvider })
+
+      // Save all API keys
       await window.seam.setSetting({ key: 'gemini_api_key', value: geminiApiKey })
+      await window.seam.setSetting({ key: 'claude_api_key', value: claudeApiKey })
+      await window.seam.setSetting({ key: 'chatgpt_api_key', value: chatgptApiKey })
 
       setSaveSuccess(true)
       setTimeout(() => setSaveSuccess(false), 3000)
@@ -1650,6 +1722,20 @@ function SettingsScreen({ onClose }: SettingsScreenProps) {
     }
   }
 
+  // Get current API key based on selected provider
+  const currentApiKey = useMemo(() => {
+    switch (aiProvider) {
+      case 'gemini':
+        return geminiApiKey
+      case 'claude':
+        return claudeApiKey
+      case 'chatgpt':
+        return chatgptApiKey
+      default:
+        return ''
+    }
+  }, [aiProvider, geminiApiKey, claudeApiKey, chatgptApiKey])
+
   return (
     <main className="flex h-screen flex-col bg-gradient-to-br from-slate-50 to-slate-100">
       {/* Header */}
@@ -1657,7 +1743,7 @@ function SettingsScreen({ onClose }: SettingsScreenProps) {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold text-gray-900">設定</h1>
-            <p className="mt-1 text-sm text-gray-600">Gemini API キーの設定</p>
+            <p className="mt-1 text-sm text-gray-600">AI プロバイダーと API キーの設定</p>
           </div>
           <button
             type="button"
@@ -1671,48 +1757,174 @@ function SettingsScreen({ onClose }: SettingsScreenProps) {
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-8">
-        <div className="mx-auto max-w-2xl">
+        <div className="mx-auto max-w-2xl space-y-6">
+          {/* AI Provider Selection */}
           <div className="rounded-xl border border-slate-200 bg-white p-8 shadow-sm">
-            <h2 className="mb-6 text-lg font-semibold text-gray-900">Gemini API キー</h2>
+            <h2 className="mb-6 text-lg font-semibold text-gray-900">AI プロバイダー</h2>
 
             {isLoading ? (
               <div className="flex items-center justify-center py-8">
                 <div className="h-8 w-8 animate-spin rounded-full border-4 border-blue-600 border-t-transparent" />
               </div>
             ) : (
+              <div className="space-y-4">
+                <p className="text-sm text-gray-600">
+                  使用する AI プロバイダーを選択してください
+                </p>
+                <div className="grid grid-cols-3 gap-4">
+                  <button
+                    type="button"
+                    onClick={() => setAiProvider('gemini')}
+                    className={`rounded-lg border-2 p-4 text-center transition ${
+                      aiProvider === 'gemini'
+                        ? 'border-blue-600 bg-blue-50'
+                        : 'border-gray-200 bg-white hover:border-gray-300'
+                    }`}
+                  >
+                    <div className="font-semibold text-gray-900">Gemini</div>
+                    <div className="mt-1 text-xs text-gray-600">2.5 Flash</div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAiProvider('claude')}
+                    className={`rounded-lg border-2 p-4 text-center transition ${
+                      aiProvider === 'claude'
+                        ? 'border-blue-600 bg-blue-50'
+                        : 'border-gray-200 bg-white hover:border-gray-300'
+                    }`}
+                  >
+                    <div className="font-semibold text-gray-900">Claude</div>
+                    <div className="mt-1 text-xs text-gray-600">Sonnet 4.5</div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAiProvider('chatgpt')}
+                    className={`rounded-lg border-2 p-4 text-center transition ${
+                      aiProvider === 'chatgpt'
+                        ? 'border-blue-600 bg-blue-50'
+                        : 'border-gray-200 bg-white hover:border-gray-300'
+                    }`}
+                  >
+                    <div className="font-semibold text-gray-900">ChatGPT</div>
+                    <div className="mt-1 text-xs text-gray-600">GPT-4o</div>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* API Keys Configuration */}
+          {!isLoading && (
+            <div className="rounded-xl border border-slate-200 bg-white p-8 shadow-sm">
+              <h2 className="mb-6 text-lg font-semibold text-gray-900">
+                API キー
+              </h2>
+
               <div className="space-y-6">
                 {/* Info box */}
                 <div className="rounded-lg border border-blue-200 bg-blue-50 p-4">
                   <p className="text-sm text-blue-900">
-                    AI機能（サマリ生成、提案生成）を使用するには、Gemini API キーが必要です。
-                    <br />
-                    <a
-                      href="https://aistudio.google.com/app/apikey"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="mt-2 inline-block font-medium text-blue-700 underline hover:text-blue-800"
-                    >
-                      Google AI Studio でAPIキーを取得 →
-                    </a>
+                    {aiProvider === 'gemini' && (
+                      <>
+                        AI機能を使用するには、Gemini API キーが必要です。
+                        <br />
+                        <a
+                          href="https://aistudio.google.com/app/apikey"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="mt-2 inline-block font-medium text-blue-700 underline hover:text-blue-800"
+                        >
+                          Google AI Studio でAPIキーを取得 →
+                        </a>
+                      </>
+                    )}
+                    {aiProvider === 'claude' && (
+                      <>
+                        AI機能を使用するには、Claude API キーが必要です。
+                        <br />
+                        <a
+                          href="https://console.anthropic.com/"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="mt-2 inline-block font-medium text-blue-700 underline hover:text-blue-800"
+                        >
+                          Anthropic Console でAPIキーを取得 →
+                        </a>
+                      </>
+                    )}
+                    {aiProvider === 'chatgpt' && (
+                      <>
+                        AI機能を使用するには、OpenAI API キーが必要です。
+                        <br />
+                        <a
+                          href="https://platform.openai.com/api-keys"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="mt-2 inline-block font-medium text-blue-700 underline hover:text-blue-800"
+                        >
+                          OpenAI Platform でAPIキーを取得 →
+                        </a>
+                      </>
+                    )}
                   </p>
                 </div>
 
-                {/* API Key input */}
-                <div className="space-y-3">
-                  <label className="block text-sm font-medium text-gray-700">
-                    APIキー
-                  </label>
-                  <input
-                    type="password"
-                    value={geminiApiKey}
-                    onChange={(e) => setGeminiApiKey(e.target.value)}
-                    placeholder="AIza..."
-                    className="w-full rounded-lg border border-gray-300 bg-white px-4 py-3 text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
-                  />
-                  <p className="text-xs text-gray-500">
-                    APIキーは暗号化されてローカルに保存されます
-                  </p>
-                </div>
+                {/* Gemini API Key */}
+                {aiProvider === 'gemini' && (
+                  <div className="space-y-3">
+                    <label className="block text-sm font-medium text-gray-700">
+                      Gemini APIキー
+                    </label>
+                    <input
+                      type="password"
+                      value={geminiApiKey}
+                      onChange={(e) => setGeminiApiKey(e.target.value)}
+                      placeholder="AIza..."
+                      className="w-full rounded-lg border border-gray-300 bg-white px-4 py-3 text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                    />
+                    <p className="text-xs text-gray-500">
+                      APIキーは暗号化されてローカルに保存されます
+                    </p>
+                  </div>
+                )}
+
+                {/* Claude API Key */}
+                {aiProvider === 'claude' && (
+                  <div className="space-y-3">
+                    <label className="block text-sm font-medium text-gray-700">
+                      Claude APIキー
+                    </label>
+                    <input
+                      type="password"
+                      value={claudeApiKey}
+                      onChange={(e) => setClaudeApiKey(e.target.value)}
+                      placeholder="sk-ant-..."
+                      className="w-full rounded-lg border border-gray-300 bg-white px-4 py-3 text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                    />
+                    <p className="text-xs text-gray-500">
+                      APIキーは暗号化されてローカルに保存されます
+                    </p>
+                  </div>
+                )}
+
+                {/* ChatGPT API Key */}
+                {aiProvider === 'chatgpt' && (
+                  <div className="space-y-3">
+                    <label className="block text-sm font-medium text-gray-700">
+                      OpenAI APIキー
+                    </label>
+                    <input
+                      type="password"
+                      value={chatgptApiKey}
+                      onChange={(e) => setChatgptApiKey(e.target.value)}
+                      placeholder="sk-..."
+                      className="w-full rounded-lg border border-gray-300 bg-white px-4 py-3 text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                    />
+                    <p className="text-xs text-gray-500">
+                      APIキーは暗号化されてローカルに保存されます
+                    </p>
+                  </div>
+                )}
 
                 {/* Error message */}
                 {error && (
@@ -1733,15 +1945,15 @@ function SettingsScreen({ onClose }: SettingsScreenProps) {
                   <button
                     type="button"
                     onClick={handleSave}
-                    disabled={isSaving || !geminiApiKey.trim()}
+                    disabled={isSaving || !currentApiKey.trim()}
                     className="rounded-lg bg-blue-600 px-6 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {isSaving ? '保存中...' : '保存'}
                   </button>
                 </div>
               </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </div>
     </main>
@@ -1749,7 +1961,7 @@ function SettingsScreen({ onClose }: SettingsScreenProps) {
 }
 
 type SessionSetupModalProps = {
-  onCreate: (title: string, duration: number, agendaItems: string[]) => void
+  onCreate: (title: string, duration: number, agendaItems: string[], aiProvider: AIProvider) => void
   isCreating: boolean
 }
 
@@ -1758,6 +1970,7 @@ function SessionSetupModal({ onCreate, isCreating }: SessionSetupModalProps) {
   const [duration, setDuration] = useState(20) // Default 20 minutes session
   const [agendaItems, setAgendaItems] = useState<string[]>([])
   const [newAgendaItem, setNewAgendaItem] = useState('')
+  const [aiProvider, setAiProvider] = useState<AIProvider>('gemini')
 
   const handleAddAgenda = () => {
     if (newAgendaItem.trim()) {
@@ -1772,7 +1985,7 @@ function SessionSetupModal({ onCreate, isCreating }: SessionSetupModalProps) {
 
   const handleSubmit = () => {
     if (title.trim() && agendaItems.length > 0 && duration > 0) {
-      onCreate(title.trim(), duration, agendaItems)
+      onCreate(title.trim(), duration, agendaItems, aiProvider)
     }
   }
 
@@ -1824,6 +2037,50 @@ function SessionSetupModal({ onCreate, isCreating }: SessionSetupModalProps) {
               +5
             </button>
             <span className="text-xs text-gray-500">5〜180分の範囲で設定できます</span>
+          </div>
+        </div>
+
+        {/* AI Provider Selection */}
+        <div className="space-y-3">
+          <label className="block text-sm font-medium text-gray-700">AI モデル</label>
+          <p className="text-xs text-gray-500">このセッションで使用するAIモデルを選択してください</p>
+          <div className="grid grid-cols-3 gap-3">
+            <button
+              type="button"
+              onClick={() => setAiProvider('gemini')}
+              className={`rounded-lg border-2 p-3 text-center transition ${
+                aiProvider === 'gemini'
+                  ? 'border-blue-600 bg-blue-50'
+                  : 'border-gray-200 bg-white hover:border-gray-300'
+              }`}
+            >
+              <div className="font-semibold text-gray-900">Gemini</div>
+              <div className="mt-1 text-xs text-gray-600">2.5 Flash</div>
+            </button>
+            <button
+              type="button"
+              onClick={() => setAiProvider('claude')}
+              className={`rounded-lg border-2 p-3 text-center transition ${
+                aiProvider === 'claude'
+                  ? 'border-blue-600 bg-blue-50'
+                  : 'border-gray-200 bg-white hover:border-gray-300'
+              }`}
+            >
+              <div className="font-semibold text-gray-900">Claude</div>
+              <div className="mt-1 text-xs text-gray-600">Sonnet 4</div>
+            </button>
+            <button
+              type="button"
+              onClick={() => setAiProvider('chatgpt')}
+              className={`rounded-lg border-2 p-3 text-center transition ${
+                aiProvider === 'chatgpt'
+                  ? 'border-blue-600 bg-blue-50'
+                  : 'border-gray-200 bg-white hover:border-gray-300'
+              }`}
+            >
+              <div className="font-semibold text-gray-900">ChatGPT</div>
+              <div className="mt-1 text-xs text-gray-600">GPT-4o</div>
+            </button>
           </div>
         </div>
 

@@ -4,6 +4,7 @@ export type SessionRecord = {
   duration?: number // Session duration in minutes
   startedAt?: number // Unix timestamp when session started
   endedAt?: number // Unix timestamp when session ended
+  aiProvider?: AIProvider // AI provider used for this session
   createdAt: number
 }
 
@@ -64,4 +65,13 @@ export type ConfirmationRecord = {
   summary?: string
   createdAt: number
   completedAt?: number
+}
+
+export type AIProvider = 'gemini' | 'claude' | 'chatgpt'
+
+export type AISettings = {
+  provider: AIProvider
+  geminiApiKey?: string
+  claudeApiKey?: string
+  chatgptApiKey?: string
 }

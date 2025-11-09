@@ -36,8 +36,12 @@
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
     "@google/generative-ai": "^0.24.1",
+    "@langchain/anthropic": "^1.0.0",
+    "@langchain/google-genai": "^1.0.0",
+    "@langchain/openai": "^1.0.0",
     "better-sqlite3": "^12.4.1",
     "dotenv": "^17.2.3",
+    "langchain": "^1.0.3",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },

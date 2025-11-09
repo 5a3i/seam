@@ -7,6 +7,7 @@ import type {
   SuggestionRecord,
   SummaryRecord,
   ConfirmationRecord,
+  AIProvider,
 } from './shared/types'
 
 const api = {
@@ -19,7 +20,7 @@ const api = {
   }),
   getDatabasePath: () => ipcRenderer.invoke('seam:get-db-path') as Promise<string>,
   getSessions: () => ipcRenderer.invoke('seam:get-sessions') as Promise<SessionRecord[]>,
-  createSession: (payload: { title?: string; duration?: number; agendaItems?: string[] }) =>
+  createSession: (payload: { title?: string; duration?: number; agendaItems?: string[]; aiProvider?: AIProvider }) =>
     ipcRenderer.invoke('seam:create-session', payload) as Promise<SessionRecord>,
   startSession: (payload: { sessionId: string }) =>
     ipcRenderer.invoke('seam:start-session', payload) as Promise<SessionRecord>,
